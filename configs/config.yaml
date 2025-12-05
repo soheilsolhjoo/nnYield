@@ -1,0 +1,52 @@
+experiment_name: "von_mises_baseline"
+
+data:
+  type: "synthetic" # Options: synthetic, csv
+  symmetry: true   # Set to true to enforce s12>=0, false for full range
+  samples:
+    loci: 200      # For shape/convexity (Mask=0)
+    uniaxial: 100   # For R-values (Mask=1)
+  input_range: [-2.0, 2.0]
+
+dynamic_convexity:
+    enabled: true
+    samples: 100     # How many random points to probe per step
+    interval: 50       # Run dynamic check every N steps (0 = every step)
+  
+symmetry:
+    enabled: true
+    samples: 100      # Number of equator points
+    interval: 10       # Run every N steps (0 = every step)
+
+anisotropy_ratio:
+    # enabled: true
+    # batch_r_fraction: 0.1  # Fraction of batch for R-value data
+    interval: 50       # Run every N steps (0 = every step)
+
+
+
+model:
+  hidden_layers: [32, 16, 8]
+  activation: "softplus"  # Must be smooth (no ReLU)
+  ref_stress: 1.0
+
+physics:  #synthetic Hill48 parameters
+  F: 0.5
+  G: 0.5
+  H: 0.5
+  N: 1.5
+
+training:
+  k_folds: 1
+  epochs: 100000             # Acts as a "Max Epochs" safety limit now
+  loss_threshold: 0.00005    # Stop if Total Loss drops below this
+  batch_size: 16
+  batch_r_fraction: 0.1
+  learning_rate: 0.001
+  weights:
+    stress: 1.0
+    r_value: 0.1           # Weight for R-value data
+    convexity: 0.01           # Weight for static data convexity
+    dynamic_convexity: 0.01   # Weight for dynamic self-consistent convexity
+    symmetry: 0.01   # Penalty for non-zero shear slope at equator
+  save_dir: "outputs/"

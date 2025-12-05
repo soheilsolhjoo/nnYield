@@ -1,0 +1,33 @@
+data:
+  input_range:
+  - -2.0
+  - 2.0
+  samples:
+    loci: 200
+    uniaxial: 100
+  symmetry: false
+  type: synthetic
+experiment_name: von_mises_baseline
+model:
+  activation: softplus
+  hidden_layers:
+  - 32
+  - 16
+  - 8
+  ref_stress: 1.0
+physics:
+  F: 0.5
+  G: 0.5
+  H: 0.5
+  N: 1.5
+training:
+  batch_r_fraction: 0.1
+  batch_size: 8
+  epochs: 1000
+  k_folds: 1
+  learning_rate: 0.001
+  save_dir: outputs/
+  weights:
+    convexity: 0.0
+    r_value: 0.0
+    stress: 1.0
