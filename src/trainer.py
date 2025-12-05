@@ -377,7 +377,7 @@ class Trainer:
                 if do_anisotropy:
                     step_res = self.train_step_dual(batch_data[0], batch_data[1], do_dyn_conv, do_symmetry)
                 else:
-                    step_res = self.train_step_shape(batch_data[0], do_dyn_conv, do_symmetry)
+                    step_res = self.train_step_shape(batch_data, do_dyn_conv, do_symmetry)
                     
                 for k, v in step_res.items(): train_metrics[k].update_state(v)
                 global_step += 1
