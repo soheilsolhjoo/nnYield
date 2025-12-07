@@ -371,11 +371,13 @@ class Trainer:
                               (dyn_interval == 0 or global_step % dyn_interval == 0)
                 do_symmetry = (sym_en and w_sym > 0 and n_sym > 0) and \
                               (sym_interval == 0 or global_step % sym_interval == 0)
-                do_anisotropy = (mode == 'dual') and (r_interval == 0 or global_step % r_interval == 0)
+                do_anisotropy = (r_interval == 0 or global_step % r_interval == 0)
 
-                # if mode == 'dual':
-                if do_anisotropy:
-                    step_res = self.train_step_dual(batch_data[0], batch_data[1], do_dyn_conv, do_symmetry)
+                if mode == 'dual':
+                    if do_anisotropy:
+                        step_res = self.train_step_dual(batch_data[0], batch_data[1], do_dyn_conv, do_symmetry)
+                    else:
+                        step_res = self.train_step_shape(batch_data[0], do_dyn_conv, do_symmetry)
                 else:
                     step_res = self.train_step_shape(batch_data, do_dyn_conv, do_symmetry)
                     
