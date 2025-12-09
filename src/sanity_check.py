@@ -137,7 +137,12 @@ class SanityChecker:
         colors = plt.cm.viridis(np.linspace(0, 1, len(shear_ratios)))
         theta = np.linspace(0, 2*np.pi, 360)
         
-        plt.figure(figsize=(7, 7))
+        # Reduced figure size slightly to fit screens/docs better
+        plt.figure(figsize=(6.5, 6.5))
+        
+        # 1. Plot Benchmark Dummy first for Legend Order
+        plt.plot([], [], 'k:', linewidth=1.5, label='Benchmark')
+
         for i, ratio in enumerate(shear_ratios):
             current_s12_val = ratio * max_shear
             s11_in = np.cos(theta); s22_in = np.sin(theta); s12_in = np.full_like(theta, current_s12_val)
@@ -146,15 +151,22 @@ class SanityChecker:
             rad_nn = ref_stress / (val_nn + 1e-8)
             rad_vm = ref_stress / (val_vm + 1e-8)
             
+            # Plot Model (Solid)
             plt.plot(rad_nn*s11_in, rad_nn*s22_in, color=colors[i], linewidth=2, label=f"Shear={ratio:.2f}")
-            lbl = "Benchmark" if i == 0 else None
-            plt.plot(rad_vm*s11_in, rad_vm*s22_in, color='k', linestyle=':', linewidth=1.5, alpha=0.7, label=lbl)
+            
+            # Plot Benchmark (Dotted) - No label in loop to avoid duplicates
+            plt.plot(rad_vm*s11_in, rad_vm*s22_in, color='k', linestyle=':', linewidth=1.5, alpha=0.6)
 
-        plt.scatter([0], [0], color='red', marker='x', s=100, label=f'Max Shear ({max_shear:.2f})', zorder=10)
+        plt.scatter([0], [0], color='red', marker='x', s=80, label=f'Max Shear', zorder=10)
         plt.axis('equal'); plt.xlabel("S11"); plt.ylabel("S22")
-        plt.legend(loc='best', fontsize='small', framealpha=0.9)
-        plt.grid(True, alpha=0.3); plt.tight_layout()
+        
+        # Legend outside or bottom to save space? Keeping inside but smaller
+        plt.legend(loc='upper right', fontsize='small', framealpha=0.9)
+        plt.grid(True, alpha=0.3)
         plt.title(f"Yield Loci Slices (Ref={ref_stress})")
+        
+        # Tight Layout with padding ensures title isn't cut off
+        plt.tight_layout(rect=[0, 0.0, 1, 0.95])
         plt.savefig(os.path.join(self.plot_dir, "yield_loci_slices.png")); plt.close()
 
     # =========================================================================
@@ -619,7 +631,72 @@ class SanityChecker:
         print(f"   [Audit 45deg] Analytical R: {r_analytical:.4f}")
         print(f"   [Audit 45deg] Network R:    {r_nn:.4f}")
         print(f"   [Audit 45deg] Error:        {abs(r_nn - r_analytical):.4f}")
-
+    
+    def _plot_gradient_components(self):
+        print("Running Gradient Component Analysis...")
+        # Grid setup (Equator slice for clarity, or flattened sphere)
+        # Using flattened sphere (Theta-Phi) to see global behavior
+        res_theta, res_phi = 60, 30
+        theta = np.linspace(0, 2*np.pi, res_theta)
+        phi = np.linspace(0, np.pi, res_phi)
+        TT, PP = np.meshgrid(theta, phi)
+        
+        # Map to stress
+        r=1.0
+        s12 = r * np.cos(PP)
+        r_p = r * np.sin(PP)
+        s11 = r_p * np.cos(TT)
+        s22 = r_p * np.sin(TT)
+        
+        flat_s11, flat_s22, flat_s12 = s11.flatten(), s22.flatten(), s12.flatten()
+        
+        # Get Gradients
+        (_, grad_nn, _), (_, grad_vm) = self._get_predictions(flat_s11, flat_s22, flat_s12)
+        
+        # Normalize for direction comparison (optional, but good for shape)
+        # Or compare raw magnitudes. Let's compare Raw Magnitudes for rigorous check.
+        # If magnitudes differ significantly, normalization helps debug direction vs scale.
+        # Let's stick to raw values as requested for "derivatives".
+        
+        comps = ['dPhi/ds11', 'dPhi/ds22', 'dPhi/ds12']
+        
+        fig, axes = plt.subplots(3, 3, figsize=(14, 12))
+        plt.suptitle("Gradient Component Analysis (Model vs Theory)", fontsize=16)
+        
+        # X/Y for plotting
+        X_plot, Y_plot = TT / np.pi, PP / np.pi
+        
+        for i in range(3): # Rows: s11, s22, s12
+            # Theory
+            g_vm = grad_vm[:, i].reshape(TT.shape)
+            ax = axes[i, 0]
+            cp1 = ax.contourf(X_plot, Y_plot, g_vm, levels=30, cmap='bwr')
+            plt.colorbar(cp1, ax=ax)
+            ax.set_title(f"Theory {comps[i]}")
+            ax.set_ylabel(r"Phi ($\times \pi$)")
+            
+            # Model
+            g_nn = grad_nn[:, i].reshape(TT.shape)
+            ax = axes[i, 1]
+            cp2 = ax.contourf(X_plot, Y_plot, g_nn, levels=30, cmap='bwr')
+            plt.colorbar(cp2, ax=ax)
+            ax.set_title(f"Model {comps[i]}")
+            
+            # Error (Abs Diff)
+            err = np.abs(g_nn - g_vm)
+            ax = axes[i, 2]
+            cp3 = ax.contourf(X_plot, Y_plot, err, levels=30, cmap='viridis')
+            plt.colorbar(cp3, ax=ax)
+            ax.set_title(f"Abs Error")
+            
+        axes[2, 0].set_xlabel(r"Theta ($\times \pi$)")
+        axes[2, 1].set_xlabel(r"Theta ($\times \pi$)")
+        axes[2, 2].set_xlabel(r"Theta ($\times \pi$)")
+        
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Make room for suptitle
+        plt.savefig(os.path.join(self.plot_dir, "gradient_components.png"))
+        plt.close()
+    
     def run_all(self):
         print("--- Starting Sanity Checks ---")
         self.check_r_calculation_logic()
@@ -630,4 +707,5 @@ class SanityChecker:
         self.check_convexity_detailed()
         self.check_global_statistics()
         self.check_loss_curve()
+        self._plot_gradient_components()
         print(f"Done. Plots in '{self.plot_dir}'")

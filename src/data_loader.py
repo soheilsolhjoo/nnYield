@@ -9,7 +9,6 @@ class YieldDataLoader:
     def get_dataset(self):
         """
         Returns: (ds_shape, ds_phys, steps_per_epoch)
-        ds_phys is None if R-value training is disabled.
         """
         # 1. Check Config for Dual Stream Eligibility
         n_uni = self.config['data']['samples'].get('uniaxial', 0)
@@ -18,7 +17,7 @@ class YieldDataLoader:
         
         use_dual_stream = (n_uni > 0) and (w_r > 0) and (batch_r_frac > 0)
 
-        # 2. Generate Raw Data
+        # 2. Generate Raw Data (Includes Anchors now)
         data_shape, data_phys = self._generate_raw_data(needs_physics=use_dual_stream)
 
         # 3. Create Shape Dataset (Always exists)
@@ -33,13 +32,12 @@ class YieldDataLoader:
             n_phys_batch = int(total_batch * batch_r_frac)
             n_shape_batch = total_batch - n_phys_batch
             
-            # Safety: Ensure at least 1 point in each stream
+            # Safety checks
             n_phys_batch = max(1, n_phys_batch)
             n_shape_batch = max(1, n_shape_batch)
             
             ds_shape = ds_shape.batch(n_shape_batch)
             
-            # Physics Dataset
             ds_phys = tf.data.Dataset.from_tensor_slices(data_phys)
             ds_phys = ds_phys.shuffle(len(data_phys[0])).repeat()
             ds_phys = ds_phys.batch(n_phys_batch)
@@ -55,8 +53,24 @@ class YieldDataLoader:
             return ds_shape, None, steps
 
     def get_numpy_data(self):
-        # Helper for Sanity Check (Always returns both)
-        return self._generate_raw_data(needs_physics=True)
+        """
+        Flattens the generated streams into single numpy arrays.
+        Used for K-Fold Cross Validation and Sanity Checks.
+        Returns: X, y_se, y_r
+        """
+        # Force generation of both streams to get maximum data
+        (X_s, y_s), (X_p, y_p, r_p, _, _) = self._generate_raw_data(needs_physics=True)
+        
+        # Concatenate Shape and Physics inputs
+        X = np.concatenate([X_s, X_p], axis=0)
+        y_se = np.concatenate([y_s, y_p], axis=0)
+        
+        # Handle R-values (Shape data has 0 R-value target, but we mask it usually)
+        # For K-Fold splitting, we just need the arrays to align
+        r_s = np.zeros((len(X_s), 1), dtype=np.float32)
+        y_r = np.concatenate([r_s, r_p], axis=0)
+        
+        return X, y_se, y_r
 
     def _generate_raw_data(self, needs_physics=True):
         n_gen = self.config['data']['samples'].get('loci', 1000)
@@ -69,7 +83,7 @@ class YieldDataLoader:
         
         use_symmetry = self.config['data'].get('symmetry', True)
 
-        # --- 1. SHAPE DATA ---
+        # --- 1. SHAPE DATA (Random Loci) ---
         if n_gen > 0:
             sampler = qmc.Sobol(d=2, scramble=True)
             sample = sampler.random(n_gen)
@@ -89,9 +103,38 @@ class YieldDataLoader:
             inputs_gen = np.stack([radius*c, radius*s, s12_g], axis=1)
             se_gen = np.ones((n_gen, 1), dtype=np.float32) * ref_stress
         else:
-            inputs_gen = np.zeros((1, 3), dtype=np.float32)
-            se_gen = np.zeros((1, 1), dtype=np.float32)
-            
+            inputs_gen = np.zeros((0, 3), dtype=np.float32)
+            se_gen = np.zeros((0, 1), dtype=np.float32)
+
+        # --- 1b. INJECT ANCHOR POINTS ---
+        # Critical stress states to enforce physics at boundaries
+        anchors_dir = np.array([
+            [1.0, 0.0, 0.0],  # Uniaxial X
+            [0.0, 1.0, 0.0],  # Uniaxial Y
+            [1.0, 1.0, 0.0],  # Equibiaxial
+            [0.0, 0.0, 1.0],  # Pure Shear (The s12!=0 case)
+            [0.0, 0.0, 0.5]   # Intermediate Shear
+        ], dtype=np.float32)
+
+        # Calculate True Hill48 Radius for these directions
+        s11, s22, s12 = anchors_dir[:,0], anchors_dir[:,1], anchors_dir[:,2]
+        term1 = F * (s22**2)
+        term2 = G * (s11**2)
+        term3 = H * ((s11 - s22)**2)
+        term4 = 2 * N * (s12**2)
+        
+        # Effective stress for unit vector:
+        eff_stress_unit = np.sqrt(term1 + term2 + term3 + term4 + 1e-8)
+        
+        # Scaling factor to put them on the yield surface
+        scale_factors = ref_stress / eff_stress_unit
+        anchors_inputs = anchors_dir * scale_factors[:, None]
+        anchors_targets = np.ones((len(anchors_inputs), 1), dtype=np.float32) * ref_stress
+
+        # Append Anchors to Shape Data
+        inputs_gen = np.concatenate([inputs_gen, anchors_inputs], axis=0)
+        se_gen = np.concatenate([se_gen, anchors_targets], axis=0)
+
         data_shape = (inputs_gen, se_gen)
         
         # --- 2. PHYSICS DATA ---
@@ -132,65 +175,18 @@ class YieldDataLoader:
                 geo_uni = np.stack([sin_a**2, cos_a**2, sin_a*cos_a], axis=1)[valid]
                 mask_uni = np.ones((len(se_uni), 1), dtype=np.float32)
             else:
-                # Fallback
-                inputs_uni = np.zeros((1, 3), dtype=np.float32)
-                se_uni = np.zeros((1, 1), dtype=np.float32)
-                r_vals = np.zeros((1, 1), dtype=np.float32)
-                geo_uni = np.zeros((1, 3), dtype=np.float32)
-                mask_uni = np.zeros((1, 1), dtype=np.float32)
+                inputs_uni = np.zeros((0, 3), dtype=np.float32)
+                se_uni = np.zeros((0, 1), dtype=np.float32)
+                r_vals = np.zeros((0, 1), dtype=np.float32)
+                geo_uni = np.zeros((0, 3), dtype=np.float32)
+                mask_uni = np.zeros((0, 1), dtype=np.float32)
         else:
-            inputs_uni = np.zeros((1, 3), dtype=np.float32)
-            se_uni = np.zeros((1, 1), dtype=np.float32)
-            r_vals = np.zeros((1, 1), dtype=np.float32)
-            geo_uni = np.zeros((1, 3), dtype=np.float32)
-            mask_uni = np.zeros((1, 1), dtype=np.float32)
+            inputs_uni = np.zeros((0, 3), dtype=np.float32)
+            se_uni = np.zeros((0, 1), dtype=np.float32)
+            r_vals = np.zeros((0, 1), dtype=np.float32)
+            geo_uni = np.zeros((0, 3), dtype=np.float32)
+            mask_uni = np.zeros((0, 1), dtype=np.float32)
 
         data_phys = (inputs_uni, se_uni, r_vals, geo_uni, mask_uni)
-
-        # --- DEBUG: VISUALIZE GENERATED DATA ---
-        # Place this block just before 'return data_shape, data_phys'
-        try:
-            import matplotlib.pyplot as plt
-            
-            # 1. Visualize Loci (Shape Stream)
-            if n_gen > 0:
-                fig = plt.figure(figsize=(12, 5))
-                
-                # 3D View
-                ax1 = fig.add_subplot(121, projection='3d')
-                s11, s22, s12 = inputs_gen[:,0], inputs_gen[:,1], inputs_gen[:,2]
-                sc1 = ax1.scatter(s11, s22, s12, c=s12, cmap='viridis', s=1, alpha=0.5)
-                ax1.set_title(f'Shape Stream (N={len(s11)})')
-                ax1.set_xlabel('S11'); ax1.set_ylabel('S22'); ax1.set_zlabel('S12')
-                
-                # 2D Projection
-                ax2 = fig.add_subplot(122)
-                sc2 = ax2.scatter(s11, s22, c=s12, cmap='viridis', s=2, alpha=0.5)
-                ax2.set_title('2D Projection (Color=Shear)')
-                ax2.set_xlabel('S11'); ax2.set_ylabel('S22'); ax2.axis('equal')
-                plt.colorbar(sc2, label='S12')
-                
-                plt.savefig("debug_loader_loci.png"); plt.close()
-                print("   [DEBUG] Saved 'debug_loader_loci.png'")
-
-            # 2. Visualize R-values (Physics Stream)
-            # We use the local variables 'alpha_uni' and 'r_calc' from the Physics block
-            if n_uni > 0 and 'valid' in locals() and np.sum(valid) > 0:
-                # Filter to show only valid points
-                alpha_plot = alpha_uni[valid]
-                r_plot = r_calc[valid]
-                
-                plt.figure(figsize=(10, 6))
-                plt.scatter(np.degrees(alpha_plot), r_plot, s=10, c='blue', label='Generated Data')
-                plt.title(f"Physics Stream: R-values (N={len(r_plot)})")
-                plt.xlabel("Loading Angle Alpha (deg)")
-                plt.ylabel("R-value")
-                plt.grid(True, alpha=0.3); plt.legend()
-                plt.savefig("debug_loader_r_values.png"); plt.close()
-                print("   [DEBUG] Saved 'debug_loader_r_values.png'")
-                
-        except Exception as e:
-            print(f"   [DEBUG] Plotting failed: {e}")
-        # ---------------------------------------
         
         return data_shape, data_phys
