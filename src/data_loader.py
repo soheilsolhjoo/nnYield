@@ -12,10 +12,18 @@ class YieldDataLoader:
         """
         # 1. Check Config for Dual Stream Eligibility
         n_uni = self.config['data']['samples'].get('uniaxial', 0)
-        w_r = self.config['training']['weights'].get('r_value', 0.0)
-        batch_r_frac = self.config['training'].get('batch_r_fraction', 0.0)
         
-        use_dual_stream = (n_uni > 0) and (w_r > 0) and (batch_r_frac > 0)
+        # FIX: w_r is in training -> weights
+        w_r = self.config['training']['weights'].get('r_value', 0.0)
+        
+        # FIX: batch_r_fraction is now in 'anisotropy_ratio', NOT 'training'
+        # We use .get() for safety, but expect the key to exist based on new config
+        ani_config = self.config.get('anisotropy_ratio', {})
+        batch_r_frac = ani_config.get('batch_r_fraction', 0.0)
+        is_enabled = ani_config.get('enabled', False)
+        
+        # Dual stream requires: Uniaxial samples exist, Weight > 0, Fraction > 0, and Enabled
+        use_dual_stream = (n_uni > 0) and (w_r > 0) and (batch_r_frac > 0) and is_enabled
 
         # 2. Generate Raw Data (Includes Anchors now)
         data_shape, data_phys = self._generate_raw_data(needs_physics=use_dual_stream)

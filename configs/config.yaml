@@ -41,7 +41,6 @@ physics:  # synthetic Hill48 parameters
 training:
   k_folds: 1
   epochs: 100000          # Acts as a "Max Epochs" safety limit
-  checkpoint_interval: 5  # Save every 50 epochs (set to 0 to disable)
   loss_threshold: 0.00005 # Stop if Total Loss drops below this
   batch_size: 16
   learning_rate: 0.001
@@ -52,3 +51,4 @@ training:
     dynamic_convexity: 0.01 # Weight for dynamic self-consistent convexity
     symmetry: 0.01        # Penalty for non-zero shear slope at equator
   save_dir: "outputs/"
+  checkpoint_interval: 50  # Save every 50 epochs (set to 0 to disable)

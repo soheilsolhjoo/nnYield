@@ -26,10 +26,23 @@ class Trainer:
         # Define Checkpoint Subfolder
         self.ckpt_dir = os.path.join(self.output_dir, "checkpoints")
 
-        # Create dirs if fresh run
+        # --- SAFETY CHECK & CREATION ---
         if not resume_path:
+            # If we are NOT resuming, check if folder exists and is populated
+            if os.path.exists(self.output_dir):
+                has_history = os.path.exists(os.path.join(self.output_dir, "loss_history.csv"))
+                has_weights = os.path.exists(os.path.join(self.output_dir, "best_model.weights.h5"))
+                
+                if has_history or has_weights:
+                    raise FileExistsError(
+                        f"⛔ Output directory '{self.output_dir}' already contains training data.\n"
+                        "   Action required: Change 'experiment_name' in config, delete the folder, or use --resume."
+                    )
+
             os.makedirs(self.output_dir, exist_ok=True)
-            os.makedirs(self.ckpt_dir, exist_ok=True) # Create subfolder
+            os.makedirs(self.ckpt_dir, exist_ok=True) 
+            
+            # Save config for fresh run (only if main run or fold 1)
             if fold_idx is None or fold_idx == 1:
                 with open(os.path.join(base_dir, "config.yaml"), 'w') as f:
                     import yaml
@@ -43,7 +56,7 @@ class Trainer:
             print(f"🔄 Resuming from: {resume_path}", flush=True)
             self._load_checkpoint(resume_path, mode='resume')
             self.output_dir = resume_path
-            self.ckpt_dir = os.path.join(self.output_dir, "checkpoints") # Ensure this is synced
+            self.ckpt_dir = os.path.join(self.output_dir, "checkpoints") 
         
         elif transfer_path:
             print(f"🚀 Transfer Learning from: {transfer_path}", flush=True)
@@ -59,7 +72,7 @@ class Trainer:
         w = config.training.weights
         print(f"Active Losses -> Stress: {w.stress>0}, R-value: {w.r_value>0}, "
               f"Convexity: {w.convexity>0}, Symmetry: {w.symmetry>0}", flush=True)
-    
+        
     def _save_checkpoint(self, epoch, is_best=False):
         if is_best:
             name = "best_model"
