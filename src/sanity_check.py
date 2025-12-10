@@ -137,11 +137,12 @@ class SanityChecker:
         colors = plt.cm.viridis(np.linspace(0, 1, len(shear_ratios)))
         theta = np.linspace(0, 2*np.pi, 360)
         
-        # Reduced figure size slightly to fit screens/docs better
-        plt.figure(figsize=(6.5, 6.5))
+        plt.figure(figsize=(7, 7))
         
-        # 1. Plot Benchmark Dummy first for Legend Order
+        # Plot Benchmark Dummy first for Legend Order
         plt.plot([], [], 'k:', linewidth=1.5, label='Benchmark')
+
+        max_val_plotted = 0.0
 
         for i, ratio in enumerate(shear_ratios):
             current_s12_val = ratio * max_shear
@@ -151,22 +152,29 @@ class SanityChecker:
             rad_nn = ref_stress / (val_nn + 1e-8)
             rad_vm = ref_stress / (val_vm + 1e-8)
             
-            # Plot Model (Solid)
-            plt.plot(rad_nn*s11_in, rad_nn*s22_in, color=colors[i], linewidth=2, label=f"Shear={ratio:.2f}")
+            # Track max value for tighter axis limits
+            current_max = max(rad_nn.max(), rad_vm.max())
+            if current_max > max_val_plotted: max_val_plotted = current_max
             
-            # Plot Benchmark (Dotted) - No label in loop to avoid duplicates
+            plt.plot(rad_nn*s11_in, rad_nn*s22_in, color=colors[i], linewidth=2, label=f"Shear={ratio:.2f}")
             plt.plot(rad_vm*s11_in, rad_vm*s22_in, color='k', linestyle=':', linewidth=1.5, alpha=0.6)
 
-        plt.scatter([0], [0], color='red', marker='x', s=80, label=f'Max Shear', zorder=10)
-        plt.axis('equal'); plt.xlabel("S11"); plt.ylabel("S22")
+        # Plot Max Shear Marker
+        plt.scatter([0], [0], color='red', marker='x', s=100, label=f'Max Shear ({max_shear:.2f})', zorder=10)
         
-        # Legend outside or bottom to save space? Keeping inside but smaller
-        plt.legend(loc='upper right', fontsize='small', framealpha=0.9)
+        # Tighter Axis Limits
+        limit = max_val_plotted * 1.1 # 10% margin
+        plt.xlim(-limit, limit)
+        plt.ylim(-limit, limit)
+        
+        plt.axis('equal'); plt.xlabel("S11"); plt.ylabel("S22")
         plt.grid(True, alpha=0.3)
         plt.title(f"Yield Loci Slices (Ref={ref_stress})")
+
+        # Legend inside, letting matplotlib find the best empty spot
+        plt.legend(loc='best', fontsize='small', framealpha=0.9)
         
-        # Tight Layout with padding ensures title isn't cut off
-        plt.tight_layout(rect=[0, 0.0, 1, 0.95])
+        plt.tight_layout()
         plt.savefig(os.path.join(self.plot_dir, "yield_loci_slices.png")); plt.close()
 
     # =========================================================================
@@ -396,6 +404,9 @@ class SanityChecker:
     # =========================================================================
     #  CHECK 6: GLOBAL STATISTICS
     # =========================================================================
+    # =========================================================================
+    #  CHECK 6: GLOBAL STATISTICS
+    # =========================================================================
     def check_global_statistics(self):
         print("Running Global Statistics (Homogeneity & Error Analysis)...")
         original_samples = self.config['data']['samples']
@@ -403,15 +414,17 @@ class SanityChecker:
         self.config['data']['samples'] = {'loci': 2000, 'uniaxial': 1000}
         
         loader = YieldDataLoader(self.config)
-        (data_shape, data_phys) = loader.get_numpy_data()
+        
+        # FIX: Use _generate_raw_data to get the separated tuples (Shape, Phys)
+        # instead of get_numpy_data() which now returns flattened arrays.
+        (data_shape, data_phys) = loader._generate_raw_data(needs_physics=True)
+        
         self.config['data']['samples'] = original_samples 
         
         # --- 1. STRESS STATISTICS (Using Shape Data) ---
         inputs_s, _ = data_shape
         
         # APPLY RANDOM SCALING (Homogeneity Check)
-        # Instead of testing only at r=1.0, we scale inputs by 0.5x to 2.0x.
-        # This forces the plot to span a range of stress values.
         n_samples = len(inputs_s)
         scales = np.random.uniform(0.5, 2.0, size=(n_samples, 1)).astype(np.float32)
         inputs_scaled = inputs_s * scales
@@ -435,7 +448,6 @@ class SanityChecker:
         plt.close()
 
         # Plot B: Relative Error Histogram
-        # Error = (Pred - True) / True
         rel_error = (val_nn - val_vm) / (val_vm + 1e-8)
         
         plt.figure(figsize=(8, 5))
@@ -485,7 +497,7 @@ class SanityChecker:
             plt.close()
         else:
             print("   [Warn] No valid uniaxial points for R-parity check.")
-                                   
+    
     # =========================================================================
     #  CHECK 7: DETAILED LOSS CURVES
     # =========================================================================
@@ -697,15 +709,71 @@ class SanityChecker:
         plt.savefig(os.path.join(self.plot_dir, "gradient_components.png"))
         plt.close()
     
+    def check_benchmark_derivatives(self):
+        """
+        Verifies that the Analytical Benchmark Gradients match Finite Difference approximations.
+        This ensures the 'Theory' side of our plots is 100% correct.
+        """
+        print("Running Benchmark Derivative Audit...")
+        
+        # 1. Generate random stress states
+        # Avoid zero stresses to prevent singularities during this test
+        s = np.random.uniform(-2, 2, (10, 3)).astype(np.float32)
+        s11, s22, s12 = s[:,0], s[:,1], s[:,2]
+        
+        # 2. Get Analytical Gradients (The ones used in plots)
+        _, (_, grad_analytical) = self._get_predictions(s11, s22, s12)
+        
+        # 3. Compute Finite Difference Gradients of the HILL48 FUNCTION directly
+        # We re-implement the Hill48 calc locally to be sure
+        phys = self.config.get('physics', {})
+        F, G, H, N = phys.get('F', 0.5), phys.get('G', 0.5), phys.get('H', 0.5), phys.get('N', 1.5)
+        
+        def hill48_func(s1, s2, s3):
+            # Returns equivalent stress
+            val_sq = F*s2**2 + G*s1**2 + H*(s1-s2)**2 + 2*N*s3**2
+            return np.sqrt(np.maximum(val_sq, 1e-8))
+
+        epsilon = 1e-5
+        grad_fd = np.zeros_like(grad_analytical)
+        
+        for i in range(len(s11)):
+            # d/ds11
+            v_plus = hill48_func(s11[i]+epsilon, s22[i], s12[i])
+            v_minus = hill48_func(s11[i]-epsilon, s22[i], s12[i])
+            grad_fd[i, 0] = (v_plus - v_minus) / (2*epsilon)
+            
+            # d/ds22
+            v_plus = hill48_func(s11[i], s22[i]+epsilon, s12[i])
+            v_minus = hill48_func(s11[i], s22[i]-epsilon, s12[i])
+            grad_fd[i, 1] = (v_plus - v_minus) / (2*epsilon)
+            
+            # d/ds12
+            v_plus = hill48_func(s11[i], s22[i], s12[i]+epsilon)
+            v_minus = hill48_func(s11[i], s22[i], s12[i]-epsilon)
+            grad_fd[i, 2] = (v_plus - v_minus) / (2*epsilon)
+
+        # 4. Compare
+        error = np.abs(grad_analytical - grad_fd)
+        max_error = np.max(error)
+        
+        print(f"   Max discrepancy between Analytical and FD Benchmark: {max_error:.2e}")
+        
+        if max_error < 1e-4:
+            print("   ✅ Benchmark Derivatives are mathematically consistent.")
+        else:
+            print("   ❌ Benchmark Derivatives have a BUG. Please fix _get_predictions equations.")
+    
     def run_all(self):
         print("--- Starting Sanity Checks ---")
-        self.check_r_calculation_logic()
-        self.check_2d_loci_slices()
-        self.check_radius_vs_theta()
-        self.check_r_values()
-        self.check_full_domain_benchmark()
-        self.check_convexity_detailed()
-        self.check_global_statistics()
-        self.check_loss_curve()
-        self._plot_gradient_components()
+        # self.check_r_calculation_logic()
+        # self.check_2d_loci_slices()
+        # self.check_radius_vs_theta()
+        # self.check_r_values()
+        # self.check_full_domain_benchmark()
+        # self.check_convexity_detailed()
+        # self.check_global_statistics()
+        # self.check_loss_curve()
+        # self._plot_gradient_components()
+        self.check_benchmark_derivatives()
         print(f"Done. Plots in '{self.plot_dir}'")

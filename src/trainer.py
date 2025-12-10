@@ -495,7 +495,7 @@ class Trainer:
                 log_str = (f"Ep {epoch}: Loss {row['train_loss']:.5f} | "
                            f"SE: {row['train_l_se']:.5f} | R: {row['train_l_r']:.5f} | "
                            f"Cv: {row['train_l_conv']:.1e} | Dy: {row['train_l_dyn']:.1e} | "
-                           f"Sy: {row['train_l_sym']:.1e} | G: {row['train_gnorm']:.1f}")
+                           f"Sy: {row['train_l_sym']:.1e} | G: {row['train_gnorm']:.5f}")
                 print(log_str, flush=True)
 
             # --- SAVE CSV INSIDE LOOP ---
