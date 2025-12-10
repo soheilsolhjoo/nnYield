@@ -51,4 +51,4 @@ training:
     dynamic_convexity: 0.01 # Weight for dynamic self-consistent convexity
     symmetry: 0.01        # Penalty for non-zero shear slope at equator
   save_dir: "outputs/"
-  checkpoint_interval: 50  # Save every 50 epochs (set to 0 to disable)
+  checkpoint_interval: 100  # Save every 50 epochs (set to 0 to disable)

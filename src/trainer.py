@@ -433,11 +433,16 @@ class Trainer:
         print(f"Training Output Directory: {self.output_dir}", flush=True)
         
         # --- DETERMINE MODE ---
-        has_uniaxial = (self.config.data.samples['uniaxial'] > 0)
-        is_enabled = self.config.anisotropy_ratio.enabled
-        fraction_valid = (self.config.anisotropy_ratio.batch_r_fraction > 0)
+        # FIX: Define n_uni before using it
+        n_uni = self.config.data.samples.get('uniaxial', 0)
+        
+        w_r = self.config.training.weights.r_value
+        ani_config = self.config.anisotropy_ratio
+        
+        # Dual stream requires: Uniaxial samples exist, Weight > 0, Fraction > 0, and Enabled
+        use_dual_stream = (n_uni > 0) and (w_r > 0) and (ani_config.batch_r_fraction > 0) and ani_config.enabled
 
-        if ds_phys is not None and is_enabled and fraction_valid and has_uniaxial:
+        if ds_phys is not None and use_dual_stream:
             dataset = tf.data.Dataset.zip((ds_shape, ds_phys)).take(steps)
             mode = 'dual'
             print("🚀 Mode: DUAL STREAM (Shape + Anisotropy)", flush=True)
@@ -485,13 +490,15 @@ class Trainer:
             
             self.history.append(row)
             
+            # --- DETAILED LOGGING RESTORED ---
             if epoch % 5 == 0 or epoch == 1:
                 log_str = (f"Ep {epoch}: Loss {row['train_loss']:.5f} | "
-                           f"SE: {row['train_l_se']:.5f} | R: {row['train_l_r']:.5f}")
+                           f"SE: {row['train_l_se']:.5f} | R: {row['train_l_r']:.5f} | "
+                           f"Cv: {row['train_l_conv']:.1e} | Dy: {row['train_l_dyn']:.1e} | "
+                           f"Sy: {row['train_l_sym']:.1e} | G: {row['train_gnorm']:.1f}")
                 print(log_str, flush=True)
 
             # --- SAVE CSV INSIDE LOOP ---
-            # Save the full history so far. This ensures data is safe if you interrupt.
             pd.DataFrame(self.history).to_csv(os.path.join(self.output_dir, "loss_history.csv"), index=False)
 
             if row['train_loss'] < best_metric:
@@ -499,8 +506,8 @@ class Trainer:
                 self._save_checkpoint(epoch, is_best=True)
             
             # --- Checkpoint Interval ---
-            ckpt_interval = self.config.training.checkpoint_interval  # Get from config
-            if ckpt_interval > 0 and epoch % ckpt_interval == 0:      # Use variable
+            ckpt_interval = self.config.training.checkpoint_interval
+            if ckpt_interval > 0 and epoch % ckpt_interval == 0:
                 self._save_checkpoint(epoch, is_best=False)
 
             if stop_loss is not None and row['train_loss'] <= stop_loss:
