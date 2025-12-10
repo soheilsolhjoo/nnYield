@@ -1,4 +1,4 @@
-experiment_name: "von_mises_32_16_8_all_options"
+experiment_name: "von_mises_test"
 
 data:
   type: "synthetic"   # Options: synthetic, csv
@@ -27,6 +27,7 @@ model:
   hidden_layers: [32, 16, 8]
   activation: "softplus" # Must be smooth (no ReLU)
   ref_stress: 1.0
+  use_icnn_constraints: false # Enforce ICNN constraints for convexity
 
 physics:  # synthetic Hill48 parameters
   # F: 3.5
@@ -42,6 +43,7 @@ training:
   k_folds: 1
   epochs: 100000          # Acts as a "Max Epochs" safety limit
   loss_threshold: 0.00005 # Stop if Total Loss drops below this
+  convexity_threshold: 0.001 # Stop if Convexity Loss drops below this
   batch_size: 16
   learning_rate: 0.001
   weights:

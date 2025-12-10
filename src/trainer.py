@@ -456,6 +456,7 @@ class Trainer:
         conf_ani = self.config.anisotropy_ratio
         w = self.config.training.weights
         stop_loss = self.config.training.loss_threshold
+        stop_conv = self.config.training.convexity_threshold
         
         global_step = self.start_epoch * steps 
         best_metric = float('inf')
@@ -510,8 +511,25 @@ class Trainer:
             if ckpt_interval > 0 and epoch % ckpt_interval == 0:
                 self._save_checkpoint(epoch, is_best=False)
 
-            if stop_loss is not None and row['train_loss'] <= stop_loss:
-                print(f"\n[Stop] Target loss {stop_loss} reached at epoch {epoch}.", flush=True)
+            # if stop_loss is not None and row['train_loss'] <= stop_loss:
+            #     print(f"\n[Stop] Target loss {stop_loss} reached at epoch {epoch}.", flush=True)
+            #     self._save_checkpoint(epoch, is_best=True)
+            #     break
+            # --- DUAL STOPPING CONDITION ---
+            has_loss_limit = stop_loss is not None
+            has_conv_limit = stop_conv is not None
+            
+            # Logic: If limit is None, we consider it "met" by default
+            loss_met = (not has_loss_limit) or (row['train_loss'] <= stop_loss)
+            conv_met = (not has_conv_limit) or (row['train_l_conv'] <= stop_conv)
+
+            # Stop only if defined criteria are met
+            if (has_loss_limit or has_conv_limit) and loss_met and conv_met:
+                print(f"\n[Stop] Targets reached at epoch {epoch}.", flush=True)
+                print(f"       Loss: {row['train_loss']:.5f} (Target: {stop_loss})")
+                if has_conv_limit:
+                    print(f"       Conv: {row['train_l_conv']:.2e} (Target: {stop_conv})")
+                
                 self._save_checkpoint(epoch, is_best=True)
                 break
 

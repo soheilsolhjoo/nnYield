@@ -26,6 +26,7 @@ class ModelConfig:
     hidden_layers: List[int]
     activation: str
     ref_stress: float
+    use_icnn_constraints: bool = False  # <--- NEW: ICNN Switch
 
 @dataclass
 class PhysicsConfig:
@@ -47,6 +48,7 @@ class TrainingConfig:
     k_folds: int
     epochs: int
     loss_threshold: float
+    convexity_threshold: float
     batch_size: int
     learning_rate: float
     weights: WeightsConfig
@@ -82,12 +84,18 @@ class Config:
             dynamic_convexity=CheckConfig(**data['dynamic_convexity']),
             symmetry=CheckConfig(**data['symmetry']),
             anisotropy_ratio=AnisotropyConfig(**data['anisotropy_ratio']),
-            model=ModelConfig(**data['model']),
+            model=ModelConfig(
+                hidden_layers=data['model']['hidden_layers'],
+                activation=data['model']['activation'],
+                ref_stress=data['model']['ref_stress'],
+                use_icnn_constraints=data['model']['use_icnn_constraints']
+            ),
             physics=PhysicsConfig(**data['physics']),
             training=TrainingConfig(
                 k_folds=data['training']['k_folds'],
                 epochs=data['training']['epochs'],
                 loss_threshold=data['training']['loss_threshold'],
+                convexity_threshold=data['training']['convexity_threshold'],
                 batch_size=data['training']['batch_size'],
                 learning_rate=data['training']['learning_rate'],
                 save_dir=data['training']['save_dir'],
@@ -105,8 +113,8 @@ class Config:
         return {
             'hidden_layers': self.model.hidden_layers,
             'activation': self.model.activation,
-            'input_dim': 2, # Hardcoded based on your problem (s1, s2)
-            'output_dim': 1 # Hardcoded (Pot)
+            'input_dim': 2, 
+            'output_dim': 1 
         }
 
 # --- Usage Helper ---

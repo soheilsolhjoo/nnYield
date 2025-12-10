@@ -59,23 +59,27 @@ class SanityChecker:
         if grads_nn is None:
             grads_nn = tf.zeros_like(inputs_tf)
             
-        # 2. Hessian (Finite Diff on NN)
+        # 2. Hessian via Finite Differences on Gradients (Robust Chain Rule)
+        # We calculate grad at x+h by differentiating f(x+h) w.r.t x (Chain Rule)
         epsilon = 1e-4
         hess_list = []
         for j in range(3):
             vec = np.zeros((1, 3), dtype=np.float32); vec[0, j] = epsilon
             vec_tf = tf.constant(vec)
             
+            # Grad at x + h
             with tf.GradientTape() as t1:
                 t1.watch(inputs_tf)
                 val_pos = self.model(inputs_tf + vec_tf)
-            grad_pos = t1.gradient(val_pos, inputs_tf + vec_tf) # Grad w.r.t perturbed input
+            # Grad w.r.t inputs_tf gives us f'(x+h) * 1
+            grad_pos = t1.gradient(val_pos, inputs_tf) 
             if grad_pos is None: grad_pos = tf.zeros_like(inputs_tf)
 
+            # Grad at x - h
             with tf.GradientTape() as t2:
                 t2.watch(inputs_tf)
                 val_neg = self.model(inputs_tf - vec_tf)
-            grad_neg = t2.gradient(val_neg, inputs_tf - vec_tf)
+            grad_neg = t2.gradient(val_neg, inputs_tf)
             if grad_neg is None: grad_neg = tf.zeros_like(inputs_tf)
             
             hess_col = (grad_pos - grad_neg) / (2.0 * epsilon)
@@ -86,7 +90,6 @@ class SanityChecker:
         grads_nn = grads_nn.numpy()
 
         # 3. Benchmark (Analytical - Force Float64 for Precision)
-        # Cast inputs to float64 to match Finite Difference precision
         s11_64 = s11.astype(np.float64)
         s22_64 = s22.astype(np.float64)
         s12_64 = s12.astype(np.float64)
@@ -96,11 +99,11 @@ class SanityChecker:
         
         # Hill48 Equivalent Stress
         term = F*s22_64**2 + G*s11_64**2 + H*(s11_64-s22_64)**2 + 2*N*s12_64**2
-        val_vm = np.sqrt(np.maximum(term, 1e-16)) # Use tighter epsilon for float64
+        val_vm = np.sqrt(np.maximum(term, 1e-16)) 
         
-        # Analytical Derivatives (d_sigma_bar / d_sigma_ij)
+        # Analytical Derivatives
         denom = val_vm 
-        denom = np.where(denom < 1e-12, 1e-12, denom) # Avoid div/0
+        denom = np.where(denom < 1e-12, 1e-12, denom)
         
         dg_d11 = (G*s11_64 + H*(s11_64-s22_64)) / denom
         dg_d22 = (F*s22_64 - H*(s11_64-s22_64)) / denom
@@ -308,7 +311,8 @@ class SanityChecker:
         print("Running Full Domain Benchmark...")
         res_theta, res_phi = 100, 50
         theta = np.linspace(0, 2*np.pi, res_theta)
-        phi = np.linspace(0, np.pi, res_phi)
+        # CHANGED: Phi range restricted to [0, pi/2] for symmetry
+        phi = np.linspace(0, np.pi/2.0, res_phi)
         TT, PP = np.meshgrid(theta, phi)
         
         r=1.0; s12=r*np.cos(PP); r_p=r*np.sin(PP); s11=r_p*np.cos(TT); s22=r_p*np.sin(TT)
@@ -327,7 +331,6 @@ class SanityChecker:
         err_angle_rad = np.nan_to_num(err_angle_rad).reshape(TT.shape)
         min_eigs = np.nan_to_num(min_eigs).reshape(TT.shape)
 
-        # --- Save ANGLES (TT, PP), not STRESS (s11, s22) ---
         df = pd.DataFrame({
             'theta_rad': TT.flatten(), 
             'phi_rad': PP.flatten(), 
@@ -356,92 +359,202 @@ class SanityChecker:
             stats = f"Min: {data.min():.2e}\nMax: {data.max():.2e}"
             plt.text(0.02, 0.98, stats, transform=plt.gca().transAxes, verticalalignment='top', bbox=dict(facecolor='white', alpha=0.8))
             plt.title(title); plt.xlabel(r"Theta ($\times \pi$)"); plt.ylabel(r"Phi ($\times \pi$)")
-            plt.savefig(os.path.join(self.plot_dir, f"{fname}.png")); plt.close()
             
+            # CHANGED: Invert Y-axis so 0 (Pole) is at the top
+            plt.gca().invert_yaxis()
+            
+            plt.savefig(os.path.join(self.plot_dir, f"{fname}.png")); plt.close()
+
+    # # =========================================================================
+    # #  CHECK 5: CONVEXITY ANALYSIS
+    # # =========================================================================
+    # def check_convexity_detailed(self):
+    #     print("Running Convexity Analysis (Robust Finite Differences)...")
+        
+    #     # --- INTERNAL HELPER: Finite Difference Hessian ---
+    #     def get_robust_hessian(s11, s22, s12):
+    #         inputs = np.stack([s11, s22, s12], axis=1).astype(np.float32)
+    #         inputs_tf = tf.constant(inputs)
+    #         epsilon = 1e-3
+    #         hess_cols = []
+            
+    #         for i in range(3): # Perturb each input dim
+    #             vec = np.zeros((1, 3), dtype=np.float32); vec[0, i] = epsilon
+    #             vec_tf = tf.constant(vec)
+                
+    #             # Grad at x + h
+    #             with tf.GradientTape() as t1:
+    #                 t1.watch(inputs_tf)
+    #                 pos_inp = inputs_tf + vec_tf
+    #                 val_pos = self.model(pos_inp)
+    #             grad_pos = t1.gradient(val_pos, pos_inp)
+    #             if grad_pos is None: grad_pos = tf.zeros_like(inputs_tf)
+
+    #             # Grad at x - h
+    #             with tf.GradientTape() as t2:
+    #                 t2.watch(inputs_tf)
+    #                 neg_inp = inputs_tf - vec_tf
+    #                 val_neg = self.model(neg_inp)
+    #             grad_neg = t2.gradient(val_neg, neg_inp)
+    #             if grad_neg is None: grad_neg = tf.zeros_like(inputs_tf)
+                
+    #             hess_col = (grad_pos - grad_neg) / (2.0 * epsilon)
+    #             hess_cols.append(hess_col)
+            
+    #         hess_mat = tf.stack(hess_cols, axis=2).numpy()
+    #         eigs = np.linalg.eigvalsh(hess_mat)
+    #         return eigs[:, 0] # Min Eigenvalue
+
+    #     # --- 1. HISTOGRAM ---
+    #     n_samples = 5000
+    #     vecs = np.random.randn(n_samples, 3)
+    #     vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
+    #     min_eigs = get_robust_hessian(vecs[:,0], vecs[:,1], vecs[:,2])
+
+    #     plt.figure(figsize=(8, 5))
+    #     plt.hist(min_eigs, bins=50, color='teal', edgecolor='black')
+    #     plt.axvline(0, color='red', linestyle='--', linewidth=2, label='Zero')
+    #     plt.title(f"Hessian Min Eigenvalues (Min: {min_eigs.min():.2e})")
+    #     plt.xlabel("Eigenvalue"); plt.ylabel("Count"); plt.legend(); plt.grid(True, alpha=0.3)
+    #     plt.yscale('log')
+    #     plt.savefig(os.path.join(self.plot_dir, "convexity_histogram.png")); plt.close()
+
+    #     # --- 2. STABILITY SLICE (Equator) ---
+    #     theta = np.linspace(0, 2*np.pi, 200)
+    #     s11=np.cos(theta); s22=np.sin(theta); s12=np.zeros_like(theta)
+    #     slice_eigs = get_robust_hessian(s11, s22, s12)
+        
+    #     plt.figure(figsize=(8, 4))
+    #     plt.plot(theta/np.pi, slice_eigs, 'k-', linewidth=1)
+    #     plt.fill_between(theta/np.pi, slice_eigs, 0, where=(slice_eigs < -1e-5), color='red', alpha=0.5, label='Unstable')
+    #     plt.fill_between(theta/np.pi, slice_eigs, 0, where=(slice_eigs >= -1e-5), color='green', alpha=0.3, label='Stable')
+    #     plt.axhline(0, color='k', linestyle='--')
+    #     plt.title("Stability Slice (Equator)"); plt.xlabel(r"Theta ($\times \pi$)"); plt.ylabel("Min Eig")
+    #     plt.legend(); plt.grid(True)
+    #     plt.savefig(os.path.join(self.plot_dir, "convexity_slice_1d.png")); plt.close()
+
+    #     # --- 3. BINARY MAP ---
+    #     res = 60 
+    #     T = np.linspace(0, 2*np.pi, res)
+    #     # CHANGED: Phi range [0, pi/2] for symmetry
+    #     P = np.linspace(0, np.pi/2.0, res)
+    #     TT, PP = np.meshgrid(T, P)
+        
+    #     r=1.0; S12=r*np.cos(PP); Rp=r*np.sin(PP); S11=Rp*np.cos(TT); S22=Rp*np.sin(TT)
+        
+    #     grid_eigs = get_robust_hessian(S11.flatten(), S22.flatten(), S12.flatten())
+    #     grid_eigs = grid_eigs.reshape(TT.shape)
+        
+    #     binary_map = np.where(grid_eigs >= -1e-5, 1.0, 0.0)
+        
+    #     plt.figure(figsize=(7, 6))
+    #     cmap = mcolors.ListedColormap(['red', 'green'])
+    #     plt.contourf(TT/np.pi, PP/np.pi, binary_map, levels=[-0.1, 0.5, 1.1], cmap=cmap)
+    #     cbar = plt.colorbar(ticks=[0, 1])
+    #     cbar.ax.set_yticklabels(['Unstable', 'Stable'])
+    #     plt.title("Binary Stability Map"); plt.xlabel(r"Theta ($\times \pi$)"); plt.ylabel(r"Phi ($\times \pi$)")
+        
+    #     # CHANGED: Invert Y-axis so 0 (Pole) is at the top
+    #     plt.gca().invert_yaxis()
+        
+    #     plt.savefig(os.path.join(self.plot_dir, "convexity_binary_map.png")); plt.close()
+
     # =========================================================================
-    #  CHECK 5: CONVEXITY ANALYSIS
+    #  CHECK 5: CONVEXITY ANALYSIS (Eigenvalues vs Principal Minors)
     # =========================================================================
     def check_convexity_detailed(self):
-        print("Running Convexity Analysis (Robust Finite Differences)...")
+        print("Running Convexity Analysis (Eigenvalues vs Sylvester's Criterion)...")
         
         # --- INTERNAL HELPER: Finite Difference Hessian ---
-        # Calculates H approx (Grad(x+h) - Grad(x-h)) / 2h
-        # This bypasses 2nd-order Autodiff issues to guarantee visibility of non-convexity.
-        def get_robust_hessian(s11, s22, s12):
+        def get_hessian_data(s11, s22, s12):
             inputs = np.stack([s11, s22, s12], axis=1).astype(np.float32)
             inputs_tf = tf.constant(inputs)
             epsilon = 1e-3
             hess_cols = []
             
-            for i in range(3): # Perturb each input dim
-                # Vec = [0, 0, 0] with epsilon at i
+            for i in range(3): 
                 vec = np.zeros((1, 3), dtype=np.float32); vec[0, i] = epsilon
                 vec_tf = tf.constant(vec)
                 
-                # Grad at x + h
                 with tf.GradientTape() as t1:
-                    t1.watch(inputs_tf)
-                    pos_inp = inputs_tf + vec_tf
-                    val_pos = self.model(pos_inp)
+                    t1.watch(inputs_tf); pos_inp = inputs_tf + vec_tf; val_pos = self.model(pos_inp)
                 grad_pos = t1.gradient(val_pos, pos_inp)
                 if grad_pos is None: grad_pos = tf.zeros_like(inputs_tf)
 
-                # Grad at x - h
                 with tf.GradientTape() as t2:
-                    t2.watch(inputs_tf)
-                    neg_inp = inputs_tf - vec_tf
-                    val_neg = self.model(neg_inp)
+                    t2.watch(inputs_tf); neg_inp = inputs_tf - vec_tf; val_neg = self.model(neg_inp)
                 grad_neg = t2.gradient(val_neg, neg_inp)
                 if grad_neg is None: grad_neg = tf.zeros_like(inputs_tf)
                 
-                # Central Difference
                 hess_col = (grad_pos - grad_neg) / (2.0 * epsilon)
                 hess_cols.append(hess_col)
             
-            # Stack to (N, 3, 3)
-            hess_mat = tf.stack(hess_cols, axis=2).numpy()
-            eigs = np.linalg.eigvalsh(hess_mat)
-            return eigs[:, 0] # Min Eigenvalue
+            hess_mat = tf.stack(hess_cols, axis=2).numpy() # (N, 3, 3)
+            return hess_mat
 
-        # --- 1. HISTOGRAM ---
+        # --- 1. COMPUTE METRICS ---
+        # Generate random samples on unit sphere
         n_samples = 5000
         vecs = np.random.randn(n_samples, 3)
         vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
-        min_eigs = get_robust_hessian(vecs[:,0], vecs[:,1], vecs[:,2])
-
-        plt.figure(figsize=(8, 5))
-        # Use log scale but handle negatives cleanly
-        plt.hist(min_eigs, bins=50, color='teal', edgecolor='black')
-        plt.axvline(0, color='red', linestyle='--', linewidth=2, label='Zero')
-        plt.title(f"Hessian Min Eigenvalues (Min: {min_eigs.min():.2e})")
-        plt.xlabel("Eigenvalue"); plt.ylabel("Count"); plt.legend(); plt.grid(True, alpha=0.3)
-        plt.yscale('log')
-        plt.savefig(os.path.join(self.plot_dir, "convexity_histogram.png")); plt.close()
-
-        # --- 2. STABILITY SLICE (Equator) ---
-        theta = np.linspace(0, 2*np.pi, 200)
-        s11=np.cos(theta); s22=np.sin(theta); s12=np.zeros_like(theta)
-        slice_eigs = get_robust_hessian(s11, s22, s12)
         
-        plt.figure(figsize=(8, 4))
-        plt.plot(theta/np.pi, slice_eigs, 'k-', linewidth=1)
-        plt.fill_between(theta/np.pi, slice_eigs, 0, where=(slice_eigs < -1e-5), color='red', alpha=0.5, label='Unstable')
-        plt.fill_between(theta/np.pi, slice_eigs, 0, where=(slice_eigs >= -1e-5), color='green', alpha=0.3, label='Stable')
-        plt.axhline(0, color='k', linestyle='--')
-        plt.title("Stability Slice (Equator)"); plt.xlabel(r"Theta ($\times \pi$)"); plt.ylabel("Min Eig")
-        plt.legend(); plt.grid(True)
-        plt.savefig(os.path.join(self.plot_dir, "convexity_slice_1d.png")); plt.close()
+        H = get_hessian_data(vecs[:,0], vecs[:,1], vecs[:,2])
+        
+        # A. Eigenvalues (Min Eig)
+        eigs = np.linalg.eigvalsh(H)
+        min_eigs = eigs[:, 0]
+        
+        # B. Principal Minors (Sylvester's Criterion)
+        # 1st Order (Diagonals)
+        m1 = np.minimum(np.minimum(H[:,0,0], H[:,1,1]), H[:,2,2])
+        
+        # 2nd Order (2x2 Determinants)
+        det_12 = H[:,0,0]*H[:,1,1] - H[:,0,1]*H[:,1,0]
+        det_13 = H[:,0,0]*H[:,2,2] - H[:,0,2]*H[:,2,0]
+        det_23 = H[:,1,1]*H[:,2,2] - H[:,1,2]*H[:,2,1]
+        m2 = np.minimum(np.minimum(det_12, det_13), det_23)
+        
+        # 3rd Order (Full Determinant)
+        m3 = np.linalg.det(H)
+        
+        # Global Minor Metric: Min of all checks (if < 0, it fails Sylvester)
+        # We use a tanh scaling or simple min to visualize "how bad" it is
+        min_principal_minor = np.minimum(np.minimum(m1, m2), m3)
 
-        # --- 3. BINARY MAP ---
-        res = 60 # Lower res for finite diff speed
-        T = np.linspace(0, 2*np.pi, res); P = np.linspace(0, np.pi, res)
+        # --- 2. PLOT COMPARISON ---
+        plt.figure(figsize=(10, 5))
+        
+        # Plot A: Eigenvalues
+        plt.subplot(1, 2, 1)
+        plt.hist(min_eigs, bins=50, color='teal', alpha=0.7, label='Min Eigenvalue')
+        plt.axvline(0, color='red', linestyle='--', linewidth=2)
+        plt.yscale('log')
+        plt.title(f"Method 1: Eigenvalues\n(Fail count: {np.sum(min_eigs < -1e-5)})")
+        plt.xlabel("Value"); plt.grid(True, alpha=0.3)
+
+        # Plot B: Principal Minors
+        plt.subplot(1, 2, 2)
+        plt.hist(min_principal_minor, bins=50, color='purple', alpha=0.7, label='Min Principal Minor')
+        plt.axvline(0, color='red', linestyle='--', linewidth=2)
+        plt.yscale('log')
+        plt.title(f"Method 2: Principal Minors\n(Fail count: {np.sum(min_principal_minor < -1e-5)})")
+        plt.xlabel("Value"); plt.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.plot_dir, "convexity_comparison.png")); plt.close()
+
+        # --- 3. BINARY MAP (Using Eigenvalues - It's more numerically stable) ---
+        res = 60 
+        T = np.linspace(0, 2*np.pi, res)
+        P = np.linspace(0, np.pi/2.0, res)
         TT, PP = np.meshgrid(T, P)
+        
         r=1.0; S12=r*np.cos(PP); Rp=r*np.sin(PP); S11=Rp*np.cos(TT); S22=Rp*np.sin(TT)
         
-        grid_eigs = get_robust_hessian(S11.flatten(), S22.flatten(), S12.flatten())
+        H_grid = get_hessian_data(S11.flatten(), S22.flatten(), S12.flatten())
+        grid_eigs = np.linalg.eigvalsh(H_grid)[:, 0]
         grid_eigs = grid_eigs.reshape(TT.shape)
         
-        # Binary: 1=Green, 0=Red
         binary_map = np.where(grid_eigs >= -1e-5, 1.0, 0.0)
         
         plt.figure(figsize=(7, 6))
@@ -449,7 +562,9 @@ class SanityChecker:
         plt.contourf(TT/np.pi, PP/np.pi, binary_map, levels=[-0.1, 0.5, 1.1], cmap=cmap)
         cbar = plt.colorbar(ticks=[0, 1])
         cbar.ax.set_yticklabels(['Unstable', 'Stable'])
-        plt.title("Binary Stability Map"); plt.xlabel(r"Theta ($\times \pi$)"); plt.ylabel(r"Phi ($\times \pi$)")
+        plt.title("Binary Stability Map (Eigenvalue Based)"); plt.xlabel(r"Theta ($\times \pi$)"); plt.ylabel(r"Phi ($\times \pi$)")
+        plt.gca().invert_yaxis()
+        
         plt.savefig(os.path.join(self.plot_dir, "convexity_binary_map.png")); plt.close()
         
     # =========================================================================
@@ -638,11 +753,11 @@ class SanityChecker:
     
     def _plot_gradient_components(self):
         print("Running Gradient Component Analysis...")
-        # Grid setup (Equator slice for clarity, or flattened sphere)
-        # Using flattened sphere (Theta-Phi) to see global behavior
+        # Grid setup
         res_theta, res_phi = 60, 30
         theta = np.linspace(0, 2*np.pi, res_theta)
-        phi = np.linspace(0, np.pi, res_phi)
+        # CHANGED: Phi range restricted to [0, pi/2]
+        phi = np.linspace(0, np.pi/2.0, res_phi)
         TT, PP = np.meshgrid(theta, phi)
         
         # Map to stress
@@ -656,11 +771,6 @@ class SanityChecker:
         
         # Get Gradients
         (_, grad_nn, _), (_, grad_vm) = self._get_predictions(flat_s11, flat_s22, flat_s12)
-        
-        # Normalize for direction comparison (optional, but good for shape)
-        # Or compare raw magnitudes. Let's compare Raw Magnitudes for rigorous check.
-        # If magnitudes differ significantly, normalization helps debug direction vs scale.
-        # Let's stick to raw values as requested for "derivatives".
         
         comps = ['dPhi/ds11', 'dPhi/ds22', 'dPhi/ds12']
         
@@ -678,6 +788,7 @@ class SanityChecker:
             plt.colorbar(cp1, ax=ax)
             ax.set_title(f"Theory {comps[i]}")
             ax.set_ylabel(r"Phi ($\times \pi$)")
+            ax.invert_yaxis() # CHANGED: Invert Y
             
             # Model
             g_nn = grad_nn[:, i].reshape(TT.shape)
@@ -685,6 +796,7 @@ class SanityChecker:
             cp2 = ax.contourf(X_plot, Y_plot, g_nn, levels=30, cmap='bwr')
             plt.colorbar(cp2, ax=ax)
             ax.set_title(f"Model {comps[i]}")
+            ax.invert_yaxis() # CHANGED: Invert Y
             
             # Error (Abs Diff)
             err = np.abs(g_nn - g_vm)
@@ -692,12 +804,13 @@ class SanityChecker:
             cp3 = ax.contourf(X_plot, Y_plot, err, levels=30, cmap='viridis')
             plt.colorbar(cp3, ax=ax)
             ax.set_title(f"Abs Error")
+            ax.invert_yaxis() # CHANGED: Invert Y
             
         axes[2, 0].set_xlabel(r"Theta ($\times \pi$)")
         axes[2, 1].set_xlabel(r"Theta ($\times \pi$)")
         axes[2, 2].set_xlabel(r"Theta ($\times \pi$)")
         
-        plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Make room for suptitle
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95]) 
         plt.savefig(os.path.join(self.plot_dir, "gradient_components.png"))
         plt.close()
     
@@ -758,14 +871,14 @@ class SanityChecker:
     
     def run_all(self):
         print("--- Starting Sanity Checks ---")
-        # self.check_r_calculation_logic()
-        # self.check_2d_loci_slices()
-        # self.check_radius_vs_theta()
-        # self.check_r_values()
-        # self.check_full_domain_benchmark()
-        # self.check_convexity_detailed()
-        # self.check_global_statistics()
-        # self.check_loss_curve()
-        # self._plot_gradient_components()
-        self.check_benchmark_derivatives()
+        self.check_r_calculation_logic()
+        self.check_2d_loci_slices()
+        self.check_radius_vs_theta()
+        self.check_r_values()
+        self.check_full_domain_benchmark()
+        self.check_convexity_detailed()
+        self.check_global_statistics()
+        self.check_loss_curve()
+        self._plot_gradient_components()
+        # self.check_benchmark_derivatives()
         print(f"Done. Plots in '{self.plot_dir}'")

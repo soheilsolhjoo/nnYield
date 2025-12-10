@@ -6,12 +6,30 @@ class HomogeneousYieldModel(tf.keras.Model):
         super(HomogeneousYieldModel, self).__init__()
         self.ref_stress = config['model']['ref_stress']
         
+        # Determine Constraint
+        # ICNN logic: Positive weights guarantee output is convex w.r.t inputs
+        use_icnn = config['model'].get('use_icnn_constraints', False)
+        k_constraint = tf.keras.constraints.NonNeg() if use_icnn else None
+        
+        if use_icnn:
+            print(f"🔒 ICNN Mode Enabled: Weights constrained to be Non-Negative.")
+
         self.hidden_layers = []
         for units in config['model']['hidden_layers']:
             self.hidden_layers.append(
-                tf.keras.layers.Dense(units, activation=config['model']['activation'])
+                tf.keras.layers.Dense(
+                    units, 
+                    activation=config['model']['activation'],
+                    kernel_constraint=k_constraint  # <--- Apply ICNN Constraint
+                )
             )
-        self.radius_out = tf.keras.layers.Dense(1, activation=config['model']['activation'])
+        
+        # Output layer also needs positive weights to maintain convexity
+        self.radius_out = tf.keras.layers.Dense(
+            1, 
+            activation=config['model']['activation'],
+            kernel_constraint=k_constraint
+        )
 
     def predict_radius(self, theta, phi):
         """
