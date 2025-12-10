@@ -51,6 +51,7 @@ class TrainingConfig:
     learning_rate: float
     weights: WeightsConfig
     save_dir: str
+    checkpoint_interval: int
 
 @dataclass
 class Config:
@@ -90,7 +91,8 @@ class Config:
                 batch_size=data['training']['batch_size'],
                 learning_rate=data['training']['learning_rate'],
                 save_dir=data['training']['save_dir'],
-                weights=WeightsConfig(**data['training']['weights'])
+                weights=WeightsConfig(**data['training']['weights']),
+                checkpoint_interval=data['training']['checkpoint_interval']
             )
         )
 

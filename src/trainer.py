@@ -11,13 +11,6 @@ from .config import Config  # Import the strictly typed Config class
 
 class Trainer:
     def __init__(self, config: Config, resume_path=None, transfer_path=None, fold_idx=None):
-        """
-        Args:
-            config: Current configuration object.
-            resume_path: Path to a FOLDER to resume from (loads config, weights, state).
-            transfer_path: Path to a FILE to transfer weights from (loads weights, arch; ignores state).
-            fold_idx: For K-Fold cross validation.
-        """
         self.config = config
         self.start_epoch = 0
         self.history = []
@@ -30,59 +23,65 @@ class Trainer:
         else:
             self.output_dir = base_dir
         
-        # Only create directory if we are NOT resuming (resuming implies it exists)
+        # Define Checkpoint Subfolder
+        self.ckpt_dir = os.path.join(self.output_dir, "checkpoints")
+
+        # Create dirs if fresh run
         if not resume_path:
             os.makedirs(self.output_dir, exist_ok=True)
-            # Save the current config for future reference (only if starting fresh)
+            os.makedirs(self.ckpt_dir, exist_ok=True) # Create subfolder
             if fold_idx is None or fold_idx == 1:
                 with open(os.path.join(base_dir, "config.yaml"), 'w') as f:
                     import yaml
                     yaml.dump(config.to_dict(), f)
 
         # --- 2. INITIALIZE OPTIMIZER ---
-        # We init optimizer here so we can load its state later if needed
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=config.training.learning_rate)
 
-        # --- 3. HANDLE CHECKPOINTS (Resume vs Transfer vs Fresh) ---
+        # --- 3. HANDLE CHECKPOINTS ---
         if resume_path:
-            print(f"🔄 Resuming from: {resume_path}")
+            print(f"🔄 Resuming from: {resume_path}", flush=True)
             self._load_checkpoint(resume_path, mode='resume')
-            # In resume mode, output_dir is the resume path
             self.output_dir = resume_path
+            self.ckpt_dir = os.path.join(self.output_dir, "checkpoints") # Ensure this is synced
         
         elif transfer_path:
-            print(f"🚀 Transfer Learning from: {transfer_path}")
+            print(f"🚀 Transfer Learning from: {transfer_path}", flush=True)
             self._load_checkpoint(transfer_path, mode='transfer')
         
         else:
-            print("✨ Starting fresh training...")
+            print("✨ Starting fresh training...", flush=True)
             self.model = HomogeneousYieldModel(self.config.to_dict())
-            self.model(tf.constant(np.zeros((1, 3), dtype=np.float32))) # Build model
+            self.model(tf.constant(np.zeros((1, 3), dtype=np.float32)))
 
         # --- 4. SETUP UTILS ---
         self.use_symmetry = config.data.symmetry
-        
-        # Print active losses
         w = config.training.weights
         print(f"Active Losses -> Stress: {w.stress>0}, R-value: {w.r_value>0}, "
-              f"Convexity: {w.convexity>0}, Symmetry: {w.symmetry>0}")
-
+              f"Convexity: {w.convexity>0}, Symmetry: {w.symmetry>0}", flush=True)
+    
     def _save_checkpoint(self, epoch, is_best=False):
-        """Saves Weights (.h5) and State (.pkl) separately."""
-        # 1. Save Weights (Keras format)
-        name = "best_model" if is_best else f"ckpt_epoch_{epoch}"
-        weights_path = os.path.join(self.output_dir, f"{name}.weights.h5")
+        if is_best:
+            name = "best_model"
+            target_dir = self.output_dir
+        else:
+            name = f"ckpt_epoch_{epoch}"
+            target_dir = self.ckpt_dir
+
+        weights_path = os.path.join(target_dir, f"{name}.weights.h5")
         self.model.save_weights(weights_path)
 
-        # 2. Save State (Optimizer, RNG, Config, History)
-        state_path = os.path.join(self.output_dir, f"{name}.state.pkl")
-        
+        try:
+            opt_weights = self.optimizer.get_weights()
+        except AttributeError:
+            opt_weights = [v.numpy() for v in self.optimizer.variables]
+
+        state_path = os.path.join(target_dir, f"{name}.state.pkl")
         state_dict = {
             'epoch': epoch,
-            'optimizer_weights': self.optimizer.get_weights(), # Save optimizer momentum/variance
-            'config': self.config.to_dict(), # CRITICAL: Save config to rebuild architecture later
+            'optimizer_weights': opt_weights, 
+            'config': self.config.to_dict(),
             'rng_numpy': np.random.get_state(),
-            # TF RNG is harder to pickle, usually mostly reliant on global seed or step
             'history': self.history
         }
         
@@ -90,21 +89,24 @@ class Trainer:
             pickle.dump(state_dict, f)
         
         if not is_best:
-            print(f"Saved checkpoint to {weights_path}")
-
+            print(f"Saved checkpoint to {weights_path}", flush=True)
+        
     def _load_checkpoint(self, path, mode):
-        """
-        mode='resume': Path is a FOLDER. Loads config, weights, optimizer, history.
-        mode='transfer': Path is a FILE (.h5 or .pkl). Loads Architecture + Weights only.
-        """
         if mode == 'resume':
-            # Find latest checkpoint in folder
             if os.path.isdir(path):
-                # Look for state files
-                states = glob.glob(os.path.join(path, "ckpt_epoch_*.state.pkl"))
+                # 1. Look in checkpoints/ subfolder first (Preferred for Resume)
+                ckpt_dir = os.path.join(path, "checkpoints")
+                states = glob.glob(os.path.join(ckpt_dir, "ckpt_epoch_*.state.pkl"))
+                
+                # 2. Look in root if subfolder empty (Legacy or Best Model only)
                 if not states:
-                    raise FileNotFoundError(f"No checkpoint states found in {path}")
-                # Sort by epoch number
+                    root_states = glob.glob(os.path.join(path, "*.state.pkl"))
+                    # Filter to avoid accidentally picking up best_model if we want latest epoch
+                    # But if only best_model exists, we use it.
+                    if not root_states:
+                        raise FileNotFoundError(f"No checkpoint states found in {path} or {ckpt_dir}")
+                    states = root_states
+
                 latest_state = max(states, key=os.path.getctime)
                 state_path = latest_state
                 weights_path = latest_state.replace(".state.pkl", ".weights.h5")
@@ -112,69 +114,61 @@ class Trainer:
                 raise ValueError("For --resume, provide the FOLDER path.")
 
         elif mode == 'transfer':
-            # Path is likely the weights file or the state file. We need the state file for architecture.
             if path.endswith(".weights.h5"):
                 weights_path = path
-                state_path = path.replace(".weights.h5", ".state.pkl") # Assume side-by-side
+                state_path = path.replace(".weights.h5", ".state.pkl")
             elif path.endswith(".state.pkl"):
                 state_path = path
                 weights_path = path.replace(".state.pkl", ".weights.h5")
             else:
-                # Try to guess
                 weights_path = path
-                state_path = path + ".state.pkl" # Blind guess
+                state_path = path + ".state.pkl"
             
             if not os.path.exists(state_path):
-                # Fallback: If we only have weights and no state/config, we MUST use current config
-                print("⚠️ Warning: No state/config file found for transfer. Assuming architecture matches current config.")
+                print("⚠️ Warning: No state file found. Assuming architecture matches config.", flush=True)
                 self.model = HomogeneousYieldModel(self.config.to_dict())
                 self.model(tf.constant(np.zeros((1, 3), dtype=np.float32)))
                 self.model.load_weights(weights_path)
                 return
 
-        # --- LOAD STATE ---
         with open(state_path, 'rb') as f:
             saved_state = pickle.load(f)
 
-        # --- 1. BUILD MODEL (Auto-Architecture) ---
-        # We use the config FROM THE FILE to build the model structure
         saved_config_dict = saved_state['config']
-        
-        # Override current config's architecture params to match saved model
         self.config.model.hidden_layers = saved_config_dict['model']['hidden_layers']
         self.config.model.activation = saved_config_dict['model']['activation']
         
-        print(f"🏗️ Rebuilding model with architecture: {self.config.model.hidden_layers}")
+        print(f"🏗️ Rebuilding model: {self.config.model.hidden_layers}", flush=True)
         self.model = HomogeneousYieldModel(self.config.to_dict())
-        self.model(tf.constant(np.zeros((1, 3), dtype=np.float32))) # Init call
+        self.model(tf.constant(np.zeros((1, 3), dtype=np.float32))) 
 
-        # --- 2. LOAD WEIGHTS ---
-        print(f"📥 Loading weights from {weights_path}...")
+        print(f"📥 Loading weights from {os.path.basename(weights_path)}...", flush=True)
         self.model.load_weights(weights_path)
 
-        # --- 3. RESUME SPECIFICS (Optimizer, History, Epoch) ---
         if mode == 'resume':
-            # Restore Epoch
             self.start_epoch = saved_state['epoch']
-            print(f"⏱️ Resuming from Epoch {self.start_epoch}")
+            print(f"⏱️ Resuming from Epoch {self.start_epoch}", flush=True)
 
-            # Restore Optimizer
-            # We must perform a dummy step to initialize optimizer variables before setting weights
             zero_grad = [tf.zeros_like(w) for w in self.model.trainable_variables]
             self.optimizer.apply_gradients(zip(zero_grad, self.model.trainable_variables))
-            self.optimizer.set_weights(saved_state['optimizer_weights'])
             
-            # Restore History
+            try:
+                self.optimizer.set_weights(saved_state['optimizer_weights'])
+            except (AttributeError, ValueError):
+                print("⚠️ Warning: Manual optimizer restore triggered.", flush=True)
+                opt_vars = self.optimizer.variables
+                saved_vars = saved_state['optimizer_weights']
+                if len(opt_vars) == len(saved_vars):
+                    for v, val in zip(opt_vars, saved_vars):
+                        v.assign(val)
+
             self.history = saved_state.get('history', [])
-            
-            # Restore RNG
             if 'rng_numpy' in saved_state:
                 np.random.set_state(saved_state['rng_numpy'])
 
         elif mode == 'transfer':
-            print("✅ Transfer complete. Starting with fresh optimizer and history.")
-            # We do NOT load optimizer, epoch, or history.
-
+            print("✅ Transfer complete. Fresh optimizer.", flush=True)
+    
     def _sample_dynamic_surface(self, n_samples, force_equator=False):
         """Generates random points ON the yield surface."""
         dim = 1 if force_equator else 2
@@ -417,20 +411,15 @@ class Trainer:
         }
         
     def run(self, train_dataset=None, val_dataset=None):
-        # --- 1. SETUP DATA ---
         if train_dataset is None:
-            # We must convert config back to dict for the DataLoader if it expects a dict
-            # Or update DataLoader to handle the Config object. 
-            # Assuming DataLoader still expects a dict for now:
             loader = YieldDataLoader(self.config.to_dict())
             ds_shape, ds_phys, steps = loader.get_dataset()
         else:
             ds_shape, ds_phys, steps = train_dataset 
             
-        print(f"Training Output Directory: {self.output_dir}")
+        print(f"Training Output Directory: {self.output_dir}", flush=True)
         
-        # --- 2. DETERMINE MODE ---
-        # Logic: If we have uniaxial data AND anisotropy is enabled
+        # --- DETERMINE MODE ---
         has_uniaxial = (self.config.data.samples['uniaxial'] > 0)
         is_enabled = self.config.anisotropy_ratio.enabled
         fraction_valid = (self.config.anisotropy_ratio.batch_r_fraction > 0)
@@ -438,38 +427,33 @@ class Trainer:
         if ds_phys is not None and is_enabled and fraction_valid and has_uniaxial:
             dataset = tf.data.Dataset.zip((ds_shape, ds_phys)).take(steps)
             mode = 'dual'
-            print("🚀 Mode: DUAL STREAM (Shape + Anisotropy)")
+            print("🚀 Mode: DUAL STREAM (Shape + Anisotropy)", flush=True)
         else:
             dataset = ds_shape.take(steps)
             mode = 'shape'
-            print("🚀 Mode: SHAPE ONLY")
+            print("🚀 Mode: SHAPE ONLY", flush=True)
 
-        # Config Shortcuts
         conf_dyn = self.config.dynamic_convexity
         conf_sym = self.config.symmetry
         conf_ani = self.config.anisotropy_ratio
-        
         w = self.config.training.weights
         stop_loss = self.config.training.loss_threshold
         
-        global_step = self.start_epoch * steps # Approx
+        global_step = self.start_epoch * steps 
         best_metric = float('inf')
         
-        # --- 3. TRAINING LOOP ---
+        # --- TRAINING LOOP ---
         for epoch in range(self.start_epoch + 1, self.config.training.epochs + 1):
             
-            # Metrics Init
             train_metrics = {k: tf.keras.metrics.Mean() for k in ['loss', 'l_se', 'l_r', 'l_conv', 'l_dyn', 'l_sym', 'gnorm']}
             
             for batch_data in dataset:
-                # --- Dynamic Checks Logic ---
                 do_dyn_conv = (conf_dyn.enabled and w.dynamic_convexity > 0) and \
                               (conf_dyn.interval == 0 or global_step % conf_dyn.interval == 0)
                 
                 do_symmetry = (conf_sym.enabled and w.symmetry > 0) and \
                               (conf_sym.interval == 0 or global_step % conf_sym.interval == 0)
                 
-                # --- Anisotropy Step Logic ---
                 run_r_step_now = (conf_ani.interval == 0) or (global_step % conf_ani.interval == 0)
 
                 if mode == 'dual':
@@ -483,10 +467,6 @@ class Trainer:
                 for k, v in step_res.items(): train_metrics[k].update_state(v)
                 global_step += 1
             
-            # --- Validation (Optional) ---
-            # (Skipped for brevity in this snippet, assumes similar logic)
-
-            # --- Logging ---
             row = {'epoch': epoch, 'lr': self.optimizer.learning_rate.numpy()}
             for k, v in train_metrics.items(): row[f"train_{k}"] = v.result().numpy()
             
@@ -495,27 +475,24 @@ class Trainer:
             if epoch % 5 == 0 or epoch == 1:
                 log_str = (f"Ep {epoch}: Loss {row['train_loss']:.5f} | "
                            f"SE: {row['train_l_se']:.5f} | R: {row['train_l_r']:.5f}")
-                print(log_str)
+                print(log_str, flush=True)
 
-            # --- Save Best ---
+            # --- SAVE CSV INSIDE LOOP ---
+            # Save the full history so far. This ensures data is safe if you interrupt.
+            pd.DataFrame(self.history).to_csv(os.path.join(self.output_dir, "loss_history.csv"), index=False)
+
             if row['train_loss'] < best_metric:
                 best_metric = row['train_loss']
                 self._save_checkpoint(epoch, is_best=True)
             
-            # --- Regular Checkpoint (e.g. every 50 epochs) ---
-            if epoch % 50 == 0:
+            # --- Checkpoint Interval ---
+            ckpt_interval = self.config.training.checkpoint_interval  # Get from config
+            if ckpt_interval > 0 and epoch % ckpt_interval == 0:      # Use variable
                 self._save_checkpoint(epoch, is_best=False)
 
-            # --- Stop Threshold ---
             if stop_loss is not None and row['train_loss'] <= stop_loss:
-                print(f"\n[Stop] Target loss {stop_loss} reached at epoch {epoch}.")
+                print(f"\n[Stop] Target loss {stop_loss} reached at epoch {epoch}.", flush=True)
                 self._save_checkpoint(epoch, is_best=True)
                 break
 
-        # Save Final History
-        if self.history:
-            mode_write = 'a' if self.start_epoch > 0 else 'w'
-            header = (self.start_epoch == 0)
-            pd.DataFrame(self.history).to_csv(os.path.join(self.output_dir, "loss_history.csv"), 
-                                              mode=mode_write, header=header, index=False)
         return best_metric
