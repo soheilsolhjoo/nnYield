@@ -16,17 +16,24 @@ class HomogeneousYieldModel(tf.keras.Model):
     def predict_radius(self, theta, phi):
         """
         Directly predicts Yield Radius from angles.
-        Updated to enforce shear symmetry by squaring cos_p.
+        Updated to use Coupled Angular Features to eliminate singularity at phi=0.
         """
-        sin_t = tf.sin(theta)
-        cos_t = tf.cos(theta)
-        sin_p = tf.sin(phi)
+        # Feature 1: d1 = sin(phi) * cos(theta)
+        # Represents the component pointing towards S11.
+        # At phi=0 (Pole), sin(phi)=0, so d1 -> 0 smoothly regardless of theta.
+        d1 = tf.sin(phi) * tf.cos(theta)
         
-        # CHANGED: Use square of cos(phi) to enforce symmetry and zero gradient at s12=0
-        cos_p_sq = tf.square(tf.cos(phi))
+        # Feature 2: d2 = sin(phi) * sin(theta)
+        # Represents the component pointing towards S22.
+        # At phi=0 (Pole), d2 -> 0 smoothly.
+        d2 = tf.sin(phi) * tf.sin(theta)
         
-        # Stack features: [sin_t, cos_t, sin_p, cos_p^2]
-        features = tf.stack([sin_t, cos_t, sin_p, cos_p_sq], axis=1)
+        # Feature 3: d3 = cos^2(phi)
+        # Represents the component pointing towards Shear (squared for symmetry).
+        d3 = tf.square(tf.cos(phi))
+        
+        # Stack coupled features: [d1, d2, d3]
+        features = tf.stack([d1, d2, d3], axis=1)
         
         x = features
         for layer in self.hidden_layers:
@@ -40,21 +47,25 @@ class HomogeneousYieldModel(tf.keras.Model):
         s22 = inputs[:, 1:2]
         s12 = inputs[:, 2:3]
         
-        # 1. Magnitudes
-        r_plane = tf.sqrt(tf.square(s11) + tf.square(s22) + 1e-8)
-        r_total = tf.sqrt(tf.square(r_plane) + tf.square(s12) + 1e-8)
+        # 1. Total Magnitude (Radius)
+        # We only need R_total now. We do NOT need r_plane anymore.
+        r_sq = tf.square(s11) + tf.square(s22) + tf.square(s12)
+        r_total = tf.sqrt(r_sq + 1e-8)
         
-        # 2. Algebraic Embeddings
-        sin_t = s22 / (r_plane + 1e-8) # Added epsilon for safety
-        cos_t = s11 / (r_plane + 1e-8)
-        sin_p = r_plane / (r_total + 1e-8)
+        # 2. Coupled Directional Embeddings (Singularity-Free)
+        # d1 = s11 / R_total  (Equivalent to sin(phi)*cos(theta))
+        # At pure shear (s11=0, s22=0), this is 0/R = 0. Smooth.
+        d1 = s11 / (r_total + 1e-8)
         
-        # CHANGED: Calculate cos_p but square it immediately
-        # cos_p = s12 / r_total  <-- Old
-        cos_p_sq = tf.square(s12 / (r_total + 1e-8)) # <-- New (Equivalent to s12^2 physics)
+        # d2 = s22 / R_total  (Equivalent to sin(phi)*sin(theta))
+        d2 = s22 / (r_total + 1e-8)
         
-        # Concatenate Features [sin_t, cos_t, sin_p, cos_p^2]
-        features = tf.concat([sin_t, cos_t, sin_p, cos_p_sq], axis=1)
+        # d3 = (s12 / R_total)^2  (Equivalent to cos^2(phi))
+        # Squared for physical symmetry (f(s12) = f(-s12))
+        d3 = tf.square(s12 / (r_total + 1e-8))
+        
+        # Concatenate Features [d1, d2, d3]
+        features = tf.concat([d1, d2, d3], axis=1)
         
         x = features
         for layer in self.hidden_layers:

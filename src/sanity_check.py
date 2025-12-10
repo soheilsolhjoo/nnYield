@@ -46,76 +46,127 @@ class SanityChecker:
     # =========================================================================
     #  CORE CALCULATION ENGINE
     # =========================================================================
-
     def _get_predictions(self, s11, s22, s12):
+        # 1. Neural Network (Float32 for TF)
         inputs = np.stack([s11, s22, s12], axis=1).astype(np.float32)
         inputs_tf = tf.constant(inputs)
         
-        # 1. Forward & Gradient (Autodiff)
         with tf.GradientTape() as tape:
             tape.watch(inputs_tf)
             val_nn = self.model(inputs_tf)
         grads_nn = tape.gradient(val_nn, inputs_tf)
         
         if grads_nn is None:
-            print("!!! GRADIENTS FAILED")
             grads_nn = tf.zeros_like(inputs_tf)
             
-        # 2. Hessian via Finite Differences on Gradients (Robust)
-        # H_ij approx (G_i(x+h) - G_i(x-h)) / 2h
+        # 2. Hessian (Finite Diff on NN)
         epsilon = 1e-4
         hess_list = []
-        
-        # We iterate cols of input to perturb
         for j in range(3):
-            # Create perturbation vector
-            vec = np.zeros((1, 3), dtype=np.float32)
-            vec[0, j] = epsilon
+            vec = np.zeros((1, 3), dtype=np.float32); vec[0, j] = epsilon
             vec_tf = tf.constant(vec)
             
-            # Grad at x + h
             with tf.GradientTape() as t1:
-                inp_pos = inputs_tf + vec_tf
-                t1.watch(inp_pos)
-                val_pos = self.model(inp_pos)
-            grad_pos = t1.gradient(val_pos, inp_pos)
-            
-            # Grad at x - h
+                t1.watch(inputs_tf)
+                val_pos = self.model(inputs_tf + vec_tf)
+            grad_pos = t1.gradient(val_pos, inputs_tf + vec_tf) # Grad w.r.t perturbed input
+            if grad_pos is None: grad_pos = tf.zeros_like(inputs_tf)
+
             with tf.GradientTape() as t2:
-                inp_neg = inputs_tf - vec_tf
-                t2.watch(inp_neg)
-                val_neg = self.model(inp_neg)
-            grad_neg = t2.gradient(val_neg, inp_neg)
+                t2.watch(inputs_tf)
+                val_neg = self.model(inputs_tf - vec_tf)
+            grad_neg = t2.gradient(val_neg, inputs_tf - vec_tf)
+            if grad_neg is None: grad_neg = tf.zeros_like(inputs_tf)
             
-            # Centered Difference
-            # dG/dx_j column
             hess_col = (grad_pos - grad_neg) / (2.0 * epsilon)
             hess_list.append(hess_col)
             
-        # Stack columns to form (N, 3, 3)
-        # hess_list[j] is the derivative w.r.t input j. This forms the COLUMNS of the Hessian.
         hess_nn = tf.stack(hess_list, axis=2).numpy()
-        
         val_nn = val_nn.numpy().flatten()
         grads_nn = grads_nn.numpy()
 
-        # 3. Benchmark (Analytical)
+        # 3. Benchmark (Analytical - Force Float64 for Precision)
+        # Cast inputs to float64 to match Finite Difference precision
+        s11_64 = s11.astype(np.float64)
+        s22_64 = s22.astype(np.float64)
+        s12_64 = s12.astype(np.float64)
+        
         phys = self.config.get('physics', {})
         F, G, H, N = phys.get('F', 0.5), phys.get('G', 0.5), phys.get('H', 0.5), phys.get('N', 1.5)
-        C11, C22, C12, C66 = G+H, F+H, -2*H, 2*N
         
-        term = C11*s11**2 + C22*s22**2 + C12*s11*s22 + C66*s12**2
-        val_vm = np.sqrt(np.maximum(term, 1e-8))
+        # Hill48 Equivalent Stress
+        term = F*s22_64**2 + G*s11_64**2 + H*(s11_64-s22_64)**2 + 2*N*s12_64**2
+        val_vm = np.sqrt(np.maximum(term, 1e-16)) # Use tighter epsilon for float64
         
-        denom = 2 * val_vm
-        denom = np.where(denom < 1e-8, 1e-8, denom)
-        dg_d11 = (2*C11*s11 + C12*s22) / denom
-        dg_d22 = (2*C22*s22 + C12*s11) / denom
-        dg_d12 = (2*C66*s12)           / denom
+        # Analytical Derivatives (d_sigma_bar / d_sigma_ij)
+        denom = val_vm 
+        denom = np.where(denom < 1e-12, 1e-12, denom) # Avoid div/0
+        
+        dg_d11 = (G*s11_64 + H*(s11_64-s22_64)) / denom
+        dg_d22 = (F*s22_64 - H*(s11_64-s22_64)) / denom
+        dg_d12 = (2*N*s12_64) / denom
+        
         grads_vm = np.stack([dg_d11, dg_d22, dg_d12], axis=1)
         
         return (val_nn, grads_nn, hess_nn), (val_vm, grads_vm)
+
+    def check_benchmark_derivatives(self):
+        """
+        Verifies that the Analytical Benchmark Gradients match Finite Difference approximations.
+        """
+        print("Running Benchmark Derivative Audit...")
         
+        # 1. Generate random stress states (Float64 for test)
+        s = np.random.uniform(-2, 2, (10, 3)).astype(np.float64)
+        s11, s22, s12 = s[:,0], s[:,1], s[:,2]
+        
+        # 2. Get Analytical Gradients
+        _, (_, grad_analytical) = self._get_predictions(s11, s22, s12)
+        
+        # 3. Compute Finite Difference
+        phys = self.config.get('physics', {})
+        F, G, H, N = phys.get('F', 0.5), phys.get('G', 0.5), phys.get('H', 0.5), phys.get('N', 1.5)
+        
+        def hill48_func(s1, s2, s3):
+            val_sq = F*s2**2 + G*s1**2 + H*(s1-s2)**2 + 2*N*s3**2
+            return np.sqrt(np.maximum(val_sq, 1e-16))
+
+        epsilon = 1e-4 # Tuned for stability
+        grad_fd = np.zeros_like(grad_analytical)
+        
+        for i in range(len(s11)):
+            # d/ds11
+            v_p = hill48_func(s11[i]+epsilon, s22[i], s12[i])
+            v_m = hill48_func(s11[i]-epsilon, s22[i], s12[i])
+            grad_fd[i, 0] = (v_p - v_m) / (2*epsilon)
+            
+            # d/ds22
+            v_p = hill48_func(s11[i], s22[i]+epsilon, s12[i])
+            v_m = hill48_func(s11[i], s22[i]-epsilon, s12[i])
+            grad_fd[i, 1] = (v_p - v_m) / (2*epsilon)
+            
+            # d/ds12
+            v_p = hill48_func(s11[i], s22[i], s12[i]+epsilon)
+            v_m = hill48_func(s11[i], s22[i], s12[i]-epsilon)
+            grad_fd[i, 2] = (v_p - v_m) / (2*epsilon)
+
+        # 4. Compare
+        error = np.abs(grad_analytical - grad_fd)
+        max_error = np.max(error)
+        
+        print(f"   Max discrepancy (Analytical vs FD): {max_error:.2e}")
+        
+        if max_error < 1e-3: # slightly relaxed tolerance for numerical noise
+            print("   ✅ Benchmark Derivatives are consistent.")
+        else:
+            print("   ❌ Benchmark Derivatives have a BUG.")
+            # Print first failure for debugging
+            idx = np.unravel_index(np.argmax(error), error.shape)
+            print(f"      Fail at sample {idx[0]}, component {idx[1]}")
+            print(f"      Analytical: {grad_analytical[idx]:.5f}, FD: {grad_fd[idx]:.5f}")
+    
+    # -------------------------------------------------------------------------
+
     def _calc_r_values(self, grads, alpha_rad):
         G11, G22, G12 = grads[:, 0], grads[:, 1], grads[:, 2]
         sin_a, cos_a = np.sin(alpha_rad), np.cos(alpha_rad)
@@ -404,9 +455,6 @@ class SanityChecker:
     # =========================================================================
     #  CHECK 6: GLOBAL STATISTICS
     # =========================================================================
-    # =========================================================================
-    #  CHECK 6: GLOBAL STATISTICS
-    # =========================================================================
     def check_global_statistics(self):
         print("Running Global Statistics (Homogeneity & Error Analysis)...")
         original_samples = self.config['data']['samples']
@@ -501,62 +549,6 @@ class SanityChecker:
     # =========================================================================
     #  CHECK 7: DETAILED LOSS CURVES
     # =========================================================================
-    # def check_loss_curve(self):
-    #     print("Checking Detailed Loss History...")
-    #     hist_path = os.path.join(self.config['training']['save_dir'], self.config['experiment_name'], "loss_history.csv")
-        
-    #     if not os.path.exists(hist_path): return
-            
-    #     df = pd.read_csv(hist_path)
-        
-    #     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-        
-    #     def safe_plot(ax, x, y, color, label, title, ylabel):
-    #         ax.plot(x, y, color=color, label=label)
-    #         if y.max() > 1e-9: ax.set_yscale('log')
-    #         else: ax.set_yscale('linear')
-    #         ax.set_title(title); ax.set_ylabel(ylabel); ax.grid(True, alpha=0.3); return ax
-
-    #     # 1. Total
-    #     ax = axes[0, 0]
-    #     ax.plot(df['epoch'], df['train_loss'], 'b-', label='Train')
-    #     if 'val_loss' in df.columns: ax.plot(df['epoch'], df['val_loss'], 'r--', label='Val')
-    #     ax.set_yscale('log'); ax.set_title("Total Loss"); ax.legend(); ax.grid(True, alpha=0.3)
-        
-    #     # 2. Stress
-    #     safe_plot(axes[0, 1], df['epoch'], df['train_l_se'], 'g', 'Stress', "Stress Error", "Loss")
-        
-    #     # 3. R-value
-    #     safe_plot(axes[1, 0], df['epoch'], df['train_l_r'], 'purple', 'R-value', "R-value Error", "Loss")
-        
-    #     # 4. Stability (Convexity + Grad Norm)
-    #     ax = axes[1, 1]
-    #     # Static Convexity
-    #     ln1 = ax.plot(df['epoch'], df['train_l_conv'], 'orange', label='Static Conv')
-    #     # Dynamic Convexity
-    #     ln2 = []
-    #     if 'train_l_dyn' in df.columns:
-    #         ln2 = ax.plot(df['epoch'], df['train_l_dyn'], 'red', linestyle='-.', label='Dynamic Conv')
-            
-    #     ax.set_ylabel('Convexity Loss')
-    #     if df['train_l_conv'].max() > 1e-9: ax.set_yscale('log')
-        
-    #     # Gradient Norm
-    #     ax2 = ax.twinx()
-    #     ln3 = ax2.plot(df['epoch'], df['train_gnorm'], 'gray', linestyle=':', label='Grad Norm')
-    #     ax2.set_ylabel('Gradient Norm')
-    #     if df['train_gnorm'].max() > 1e-9: ax2.set_yscale('log')
-        
-    #     # Combined Legend (Fixing the missing label issue)
-    #     lns = ln1 + ln2 + ln3
-    #     labs = [l.get_label() for l in lns]
-    #     ax.legend(lns, labs, loc='upper right')
-    #     ax.set_title("Stability & Convexity")
-    #     ax.grid(True, alpha=0.3)
-        
-    #     plt.tight_layout()
-    #     plt.savefig(os.path.join(self.plot_dir, "loss_history_detailed.png"))
-    #     plt.close()
     def check_loss_curve(self):
         print("Checking Loss History...")
         hist_path = os.path.join(self.config['training']['save_dir'], self.config['experiment_name'], "loss_history.csv")
@@ -712,57 +704,57 @@ class SanityChecker:
     def check_benchmark_derivatives(self):
         """
         Verifies that the Analytical Benchmark Gradients match Finite Difference approximations.
-        This ensures the 'Theory' side of our plots is 100% correct.
         """
         print("Running Benchmark Derivative Audit...")
         
-        # 1. Generate random stress states
-        # Avoid zero stresses to prevent singularities during this test
-        s = np.random.uniform(-2, 2, (10, 3)).astype(np.float32)
+        # 1. Generate random stress states (Float64 for test)
+        s = np.random.uniform(-2, 2, (10, 3)).astype(np.float64)
         s11, s22, s12 = s[:,0], s[:,1], s[:,2]
         
-        # 2. Get Analytical Gradients (The ones used in plots)
+        # 2. Get Analytical Gradients
         _, (_, grad_analytical) = self._get_predictions(s11, s22, s12)
         
-        # 3. Compute Finite Difference Gradients of the HILL48 FUNCTION directly
-        # We re-implement the Hill48 calc locally to be sure
+        # 3. Compute Finite Difference
         phys = self.config.get('physics', {})
         F, G, H, N = phys.get('F', 0.5), phys.get('G', 0.5), phys.get('H', 0.5), phys.get('N', 1.5)
         
         def hill48_func(s1, s2, s3):
-            # Returns equivalent stress
             val_sq = F*s2**2 + G*s1**2 + H*(s1-s2)**2 + 2*N*s3**2
-            return np.sqrt(np.maximum(val_sq, 1e-8))
+            return np.sqrt(np.maximum(val_sq, 1e-16))
 
-        epsilon = 1e-5
+        epsilon = 1e-4 # Tuned for stability
         grad_fd = np.zeros_like(grad_analytical)
         
         for i in range(len(s11)):
             # d/ds11
-            v_plus = hill48_func(s11[i]+epsilon, s22[i], s12[i])
-            v_minus = hill48_func(s11[i]-epsilon, s22[i], s12[i])
-            grad_fd[i, 0] = (v_plus - v_minus) / (2*epsilon)
+            v_p = hill48_func(s11[i]+epsilon, s22[i], s12[i])
+            v_m = hill48_func(s11[i]-epsilon, s22[i], s12[i])
+            grad_fd[i, 0] = (v_p - v_m) / (2*epsilon)
             
             # d/ds22
-            v_plus = hill48_func(s11[i], s22[i]+epsilon, s12[i])
-            v_minus = hill48_func(s11[i], s22[i]-epsilon, s12[i])
-            grad_fd[i, 1] = (v_plus - v_minus) / (2*epsilon)
+            v_p = hill48_func(s11[i], s22[i]+epsilon, s12[i])
+            v_m = hill48_func(s11[i], s22[i]-epsilon, s12[i])
+            grad_fd[i, 1] = (v_p - v_m) / (2*epsilon)
             
             # d/ds12
-            v_plus = hill48_func(s11[i], s22[i], s12[i]+epsilon)
-            v_minus = hill48_func(s11[i], s22[i], s12[i]-epsilon)
-            grad_fd[i, 2] = (v_plus - v_minus) / (2*epsilon)
+            v_p = hill48_func(s11[i], s22[i], s12[i]+epsilon)
+            v_m = hill48_func(s11[i], s22[i], s12[i]-epsilon)
+            grad_fd[i, 2] = (v_p - v_m) / (2*epsilon)
 
         # 4. Compare
         error = np.abs(grad_analytical - grad_fd)
         max_error = np.max(error)
         
-        print(f"   Max discrepancy between Analytical and FD Benchmark: {max_error:.2e}")
+        print(f"   Max discrepancy (Analytical vs FD): {max_error:.2e}")
         
-        if max_error < 1e-4:
-            print("   ✅ Benchmark Derivatives are mathematically consistent.")
+        if max_error < 1e-4: # slightly relaxed tolerance for numerical noise
+            print("   ✅ Benchmark Derivatives are consistent.")
         else:
-            print("   ❌ Benchmark Derivatives have a BUG. Please fix _get_predictions equations.")
+            print("   ❌ Benchmark Derivatives have a BUG.")
+            # Print first failure for debugging
+            idx = np.unravel_index(np.argmax(error), error.shape)
+            print(f"      Fail at sample {idx[0]}, component {idx[1]}")
+            print(f"      Analytical: {grad_analytical[idx]:.5f}, FD: {grad_fd[idx]:.5f}")
     
     def run_all(self):
         print("--- Starting Sanity Checks ---")

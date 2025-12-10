@@ -87,6 +87,8 @@ class YieldDataLoader:
         ref_stress = self.config['model']['ref_stress']
         phys = self.config.get('physics', {})
         F, G, H, N = phys.get('F', 0.5), phys.get('G', 0.5), phys.get('H', 0.5), phys.get('N', 1.5)
+        
+        # C-coefficients kept for Shape Data (Loci) generation as it's cleaner for polar coords
         C11, C22, C12, C66 = G+H, F+H, -2*H, 2*N
         
         use_symmetry = self.config['data'].get('symmetry', True)
@@ -115,34 +117,23 @@ class YieldDataLoader:
             se_gen = np.zeros((0, 1), dtype=np.float32)
 
         # --- 1b. INJECT ANCHOR POINTS ---
-        # Critical stress states to enforce physics at boundaries
         anchors_dir = np.array([
-            [1.0, 0.0, 0.0],  # Uniaxial X
-            [0.0, 1.0, 0.0],  # Uniaxial Y
-            [1.0, 1.0, 0.0],  # Equibiaxial
-            [0.0, 0.0, 1.0],  # Pure Shear (The s12!=0 case)
-            [0.0, 0.0, 0.5]   # Intermediate Shear
+            [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0],
+            [1.0, 1.0, 0.0], [-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [-1.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0]
         ], dtype=np.float32)
 
-        # Calculate True Hill48 Radius for these directions
         s11, s22, s12 = anchors_dir[:,0], anchors_dir[:,1], anchors_dir[:,2]
-        term1 = F * (s22**2)
-        term2 = G * (s11**2)
-        term3 = H * ((s11 - s22)**2)
-        term4 = 2 * N * (s12**2)
+        # Use Direct Form for consistency
+        term = F*s22**2 + G*s11**2 + H*(s11-s22)**2 + 2*N*s12**2
+        eff_stress_unit = np.sqrt(term + 1e-8)
         
-        # Effective stress for unit vector:
-        eff_stress_unit = np.sqrt(term1 + term2 + term3 + term4 + 1e-8)
-        
-        # Scaling factor to put them on the yield surface
         scale_factors = ref_stress / eff_stress_unit
         anchors_inputs = anchors_dir * scale_factors[:, None]
         anchors_targets = np.ones((len(anchors_inputs), 1), dtype=np.float32) * ref_stress
 
-        # Append Anchors to Shape Data
         inputs_gen = np.concatenate([inputs_gen, anchors_inputs], axis=0)
         se_gen = np.concatenate([se_gen, anchors_targets], axis=0)
-
         data_shape = (inputs_gen, se_gen)
         
         # --- 2. PHYSICS DATA ---
@@ -150,25 +141,29 @@ class YieldDataLoader:
             sampler_uni = qmc.Sobol(d=1, scramble=True)
             sample_uni = sampler_uni.random(n_uni)
             
-            if use_symmetry:
-                alpha_uni = (sample_uni[:, 0] * np.pi / 2.0).astype(np.float32)
-            else:
-                alpha_uni = (sample_uni[:, 0] * np.pi).astype(np.float32)
-            
+            alpha_uni = (sample_uni[:, 0] * np.pi / (2.0 if use_symmetry else 1.0)).astype(np.float32)
             sin_a, cos_a = np.sin(alpha_uni), np.cos(alpha_uni)
+            
+            # Unit vector components
             u11, u22, u12 = cos_a**2, sin_a**2, sin_a*cos_a
             
-            hill_u = C11*u11**2 + C22*u22**2 + C12*u11*u22 + C66*u12**2
-            scale_uni = ref_stress / np.sqrt(hill_u + 1e-8)
+            # Scale to Yield Surface
+            term_u = F*u22**2 + G*u11**2 + H*(u11-u22)**2 + 2*N*u12**2
+            scale_uni = ref_stress / np.sqrt(term_u + 1e-8)
             
             inputs_uni = np.stack([u11*scale_uni, u22*scale_uni, u12*scale_uni], axis=1)
             se_uni = np.ones((n_uni, 1), dtype=np.float32) * ref_stress
             
-            # Targets
-            scale_g = 1.0 / (2.0 * ref_stress)
-            g11 = scale_g * (2*C11*inputs_uni[:,0] + C12*inputs_uni[:,1])
-            g22 = scale_g * (2*C22*inputs_uni[:,1] + C12*inputs_uni[:,0])
-            g12 = scale_g * (2*C66*inputs_uni[:,2])
+            # Targets (Gradients of Hill48 at these points)
+            # Since points are on yield surface, bar_sigma = ref_stress.
+            # d/ds11 = (G*s11 + H(s11-s22)) / bar_sigma
+            
+            s11, s22, s12 = inputs_uni[:,0], inputs_uni[:,1], inputs_uni[:,2]
+            denom = ref_stress # Since points are scaled to ref_stress
+            
+            g11 = (G*s11 + H*(s11-s22)) / denom
+            g22 = (F*s22 - H*(s11-s22)) / denom
+            g12 = (2*N*s12) / denom
             
             d_eps_t = -(g11 + g22)
             d_eps_w = g11*sin_a**2 + g22*cos_a**2 - 2*g12*sin_a*cos_a
@@ -183,18 +178,11 @@ class YieldDataLoader:
                 geo_uni = np.stack([sin_a**2, cos_a**2, sin_a*cos_a], axis=1)[valid]
                 mask_uni = np.ones((len(se_uni), 1), dtype=np.float32)
             else:
-                inputs_uni = np.zeros((0, 3), dtype=np.float32)
-                se_uni = np.zeros((0, 1), dtype=np.float32)
-                r_vals = np.zeros((0, 1), dtype=np.float32)
-                geo_uni = np.zeros((0, 3), dtype=np.float32)
-                mask_uni = np.zeros((0, 1), dtype=np.float32)
+                inputs_uni, se_uni, r_vals, geo_uni, mask_uni = [np.array([]) for _ in range(5)]
         else:
             inputs_uni = np.zeros((0, 3), dtype=np.float32)
-            se_uni = np.zeros((0, 1), dtype=np.float32)
-            r_vals = np.zeros((0, 1), dtype=np.float32)
+            se_uni, r_vals, mask_uni = [np.zeros((0, 1), dtype=np.float32) for _ in range(3)]
             geo_uni = np.zeros((0, 3), dtype=np.float32)
-            mask_uni = np.zeros((0, 1), dtype=np.float32)
 
         data_phys = (inputs_uni, se_uni, r_vals, geo_uni, mask_uni)
-        
         return data_shape, data_phys
