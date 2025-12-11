@@ -42,6 +42,7 @@ class WeightsConfig:
     convexity: float
     dynamic_convexity: float
     symmetry: float
+    gradient_norm: float
 
 @dataclass
 class TrainingConfig:

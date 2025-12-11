@@ -228,88 +228,109 @@ class Trainer:
     def train_step_dual(self, batch_shape, batch_phys, do_dyn_conv, do_symmetry):
         inp_s, tar_se_s = batch_shape
         inp_p, tar_se_p, tar_r, geo_p, r_mask = batch_phys
-
-        # Use weights from Config Class
         w = self.config.training.weights
         
-        loss_conv = tf.constant(0.0)
-        loss_dyn = tf.constant(0.0)
-        loss_sym = tf.constant(0.0)
-        
-        # Dynamic Sampling
-        if do_dyn_conv and w.dynamic_convexity > 0:
-            n_dyn = self.config.dynamic_convexity.samples
-            inp_dyn = self._sample_dynamic_surface(n_dyn, force_equator=False)
-        
-        if do_symmetry and w.symmetry > 0:
-            n_sym = self.config.symmetry.samples
-            inp_sym = self._sample_dynamic_surface(n_sym, force_equator=True)
+        # Setup nested tape for second-order derivative (Gradient Penalty)
+        with tf.GradientTape() as tape_outer:
+            with tf.GradientTape() as tape_inner:
+                
+                loss_conv = tf.constant(0.0)
+                loss_dyn = tf.constant(0.0)
+                loss_sym = tf.constant(0.0)
+                
+                # Dynamic Sampling
+                if do_dyn_conv and w.dynamic_convexity > 0:
+                    n_dyn = self.config.dynamic_convexity.samples
+                    inp_dyn = self._sample_dynamic_surface(n_dyn, force_equator=False)
+                
+                if do_symmetry and w.symmetry > 0:
+                    n_sym = self.config.symmetry.samples
+                    inp_sym = self._sample_dynamic_surface(n_sym, force_equator=True)
 
-        with tf.GradientTape() as model_tape:
-            # 1. Static Convexity
-            if w.convexity > 0:
-                loss_conv = self._compute_convexity_loss(inp_s)
-            
-            # 2. Dynamic Convexity
-            if do_dyn_conv and w.dynamic_convexity > 0:
-                loss_dyn = self._compute_convexity_loss(inp_dyn)
+                # 1. Static Convexity
+                if w.convexity > 0:
+                    loss_conv = self._compute_convexity_loss(inp_s)
+                
+                # 2. Dynamic Convexity
+                if do_dyn_conv and w.dynamic_convexity > 0:
+                    loss_dyn = self._compute_convexity_loss(inp_dyn)
 
-            # 3. Symmetry Loss
-            if do_symmetry and w.symmetry > 0:
-                with tf.GradientTape() as tape_sym:
-                    tape_sym.watch(inp_sym)
-                    pred_se_sym = self.model(inp_sym)
-                grads_sym = tape_sym.gradient(pred_se_sym, inp_sym)
-                if grads_sym is None: grads_sym = tf.zeros_like(inp_sym)
-                loss_sym = tf.reduce_mean(tf.square(grads_sym[:, 2]))
+                # 3. Symmetry Loss
+                if do_symmetry and w.symmetry > 0:
+                    with tf.GradientTape() as tape_sym:
+                        tape_sym.watch(inp_sym)
+                        pred_se_sym = self.model(inp_sym)
+                    grads_sym = tape_sym.gradient(pred_se_sym, inp_sym)
+                    if grads_sym is None: grads_sym = tf.zeros_like(inp_sym)
+                    loss_sym = tf.reduce_mean(tf.square(grads_sym[:, 2]))
 
-            # 4. Stress Loss (Shape)
-            pred_se_s = self.model(inp_s)
-            loss_stress_s = tf.reduce_mean(tf.square(pred_se_s - tar_se_s))
+                # 4. Stress Loss (Shape)
+                pred_se_s = self.model(inp_s)
+                loss_stress_s = tf.reduce_mean(tf.square(pred_se_s - tar_se_s))
 
-            # 5. R-value Loss & Stress Loss (Phys)
-            if w.r_value > 0:
-                with tf.GradientTape() as tape_r:
-                    tape_r.watch(inp_p)
+                # 5. R-value & Stress (Phys)
+                if w.r_value > 0:
+                    with tf.GradientTape() as tape_r:
+                        tape_r.watch(inp_p)
+                        pred_se_p = self.model(inp_p)
+                    grads_p = tape_r.gradient(pred_se_p, inp_p, unconnected_gradients=tf.UnconnectedGradients.ZERO)
+                    gnorms = tf.norm(grads_p, axis=1, keepdims=True) + 1e-8
+                    grads_norm = tf.math.divide_no_nan(grads_p, gnorms)
+                    
+                    ds_11, ds_22, ds_12 = grads_norm[:,0], grads_norm[:,1], grads_norm[:,2]
+                    sin2, cos2, sc = geo_p[:,0], geo_p[:,1], geo_p[:,2]
+                    
+                    d_eps_thick = -(ds_11 + ds_22)
+                    d_eps_width = ds_11*sin2 + ds_22*cos2 - 2*ds_12*sc
+                    
+                    numerator = d_eps_width - (tar_r * d_eps_thick)
+                    denominator = tf.sqrt(1.0 + tf.square(tar_r))
+                    geo_error = tf.math.divide_no_nan(numerator, denominator)
+                    
+                    masked_sq_error = tf.square(geo_error) * r_mask
+                    loss_r = tf.reduce_sum(masked_sq_error) / (tf.reduce_sum(r_mask) + 1e-8)
+                    loss_stress_p = tf.reduce_mean(tf.square(pred_se_p - tar_se_p))
+                else:
                     pred_se_p = self.model(inp_p)
-                grads_p = tape_r.gradient(pred_se_p, inp_p, unconnected_gradients=tf.UnconnectedGradients.ZERO)
-                gnorms = tf.norm(grads_p, axis=1, keepdims=True) + 1e-8
-                grads_norm = tf.math.divide_no_nan(grads_p, gnorms)
-                
-                ds_11, ds_22, ds_12 = grads_norm[:,0], grads_norm[:,1], grads_norm[:,2]
-                sin2, cos2, sc = geo_p[:,0], geo_p[:,1], geo_p[:,2]
-                
-                d_eps_thick = -(ds_11 + ds_22)
-                d_eps_width = ds_11*sin2 + ds_22*cos2 - 2*ds_12*sc
-                
-                numerator = d_eps_width - (tar_r * d_eps_thick)
-                denominator = tf.sqrt(1.0 + tf.square(tar_r))
-                geo_error = tf.math.divide_no_nan(numerator, denominator)
-                
-                masked_sq_error = tf.square(geo_error) * r_mask
-                loss_r = tf.reduce_sum(masked_sq_error) / (tf.reduce_sum(r_mask) + 1e-8)
-                loss_stress_p = tf.reduce_mean(tf.square(pred_se_p - tar_se_p))
-            else:
-                pred_se_p = self.model(inp_p)
-                loss_stress_p = tf.reduce_mean(tf.square(pred_se_p - tar_se_p))
-                loss_r = tf.constant(0.0)
+                    loss_stress_p = tf.reduce_mean(tf.square(pred_se_p - tar_se_p))
+                    loss_r = tf.constant(0.0)
 
-            # Combine Stress Losses
-            r_frac = self.config.anisotropy_ratio.batch_r_fraction # Get from correct section
-            loss_stress = (loss_stress_s * (1.0 - r_frac)) + (loss_stress_p * r_frac)
+                # Combine Primary Losses
+                r_frac = self.config.anisotropy_ratio.batch_r_fraction
+                loss_stress = (loss_stress_s * (1.0 - r_frac)) + (loss_stress_p * r_frac)
+                
+                primary_loss = (w.stress * loss_stress) + (w.r_value * loss_r) + \
+                               (w.convexity * loss_conv) + (w.dynamic_convexity * loss_dyn) + \
+                               (w.symmetry * loss_sym)
             
-            total_loss = (w.stress * loss_stress) + (w.r_value * loss_r) + \
-                         (w.convexity * loss_conv) + (w.dynamic_convexity * loss_dyn) + \
-                         (w.symmetry * loss_sym)
+            # --- GRADIENT PENALTY LOGIC ---
+            # 1. Calculate gradients of Primary Loss w.r.t weights
+            grads_primary = tape_inner.gradient(primary_loss, self.model.trainable_variables)
+            
+            # Handle None gradients safely
+            grads_primary_safe = [g if g is not None else tf.zeros_like(v) 
+                                  for g, v in zip(grads_primary, self.model.trainable_variables)]
+            
+            # 2. Compute Norm
+            gnorm_val = tf.linalg.global_norm(grads_primary_safe)
+            
+            # 3. Add to Total Loss (Weighted)
+            total_loss = primary_loss
+            if w.gradient_norm > 0:
+                total_loss += (w.gradient_norm * gnorm_val)
 
-        model_grads = model_tape.gradient(total_loss, self.model.trainable_variables)
-        gnorm_val = tf.linalg.global_norm(model_grads)
-        self.optimizer.apply_gradients(zip(model_grads, self.model.trainable_variables))
+        # 4. Compute Final Gradients (Second Derivative)
+        final_grads = tape_outer.gradient(total_loss, self.model.trainable_variables)
+        final_grads_safe = [g if g is not None else tf.zeros_like(v) 
+                            for g, v in zip(final_grads, self.model.trainable_variables)]
+        
+        self.optimizer.apply_gradients(zip(final_grads_safe, self.model.trainable_variables))
         
         return {
-            'loss': total_loss, 'l_se': loss_stress, 'l_r': loss_r, 
+            'loss': primary_loss, # Log the physics loss, not the penalized one
+            'l_se': loss_stress, 'l_r': loss_r, 
             'l_conv': loss_conv, 'l_dyn': loss_dyn, 'l_sym': loss_sym, 
-            'gnorm': gnorm_val
+            'gnorm': gnorm_val # Log the norm we calculated
         }
 
     @tf.function
@@ -317,45 +338,59 @@ class Trainer:
         inp_s, tar_se_s = batch_shape
         w = self.config.training.weights
 
-        loss_conv = tf.constant(0.0)
-        loss_dyn = tf.constant(0.0)
-        loss_sym = tf.constant(0.0)
-        
-        if do_dyn_conv and w.dynamic_convexity > 0:
-            n_dyn = self.config.dynamic_convexity.samples
-            inp_dyn = self._sample_dynamic_surface(n_dyn, force_equator=False)
-        
-        if do_symmetry and w.symmetry > 0:
-            n_sym = self.config.symmetry.samples
-            inp_sym = self._sample_dynamic_surface(n_sym, force_equator=True)
+        with tf.GradientTape() as tape_outer:
+            with tf.GradientTape() as tape_inner:
+                loss_conv = tf.constant(0.0)
+                loss_dyn = tf.constant(0.0)
+                loss_sym = tf.constant(0.0)
+                
+                if do_dyn_conv and w.dynamic_convexity > 0:
+                    n_dyn = self.config.dynamic_convexity.samples
+                    inp_dyn = self._sample_dynamic_surface(n_dyn, force_equator=False)
+                
+                if do_symmetry and w.symmetry > 0:
+                    n_sym = self.config.symmetry.samples
+                    inp_sym = self._sample_dynamic_surface(n_sym, force_equator=True)
 
-        with tf.GradientTape() as model_tape:
-            if w.convexity > 0:
-                loss_conv = self._compute_convexity_loss(inp_s)
+                if w.convexity > 0:
+                    loss_conv = self._compute_convexity_loss(inp_s)
+                
+                if do_dyn_conv and w.dynamic_convexity > 0:
+                    loss_dyn = self._compute_convexity_loss(inp_dyn)
+
+                if do_symmetry and w.symmetry > 0:
+                    with tf.GradientTape() as tape_sym:
+                        tape_sym.watch(inp_sym)
+                        pred_se_sym = self.model(inp_sym)
+                    grads_sym = tape_sym.gradient(pred_se_sym, inp_sym)
+                    if grads_sym is None: grads_sym = tf.zeros_like(inp_sym)
+                    loss_sym = tf.reduce_mean(tf.square(grads_sym[:, 2]))
+
+                pred_se_s = self.model(inp_s)
+                loss_stress = tf.reduce_mean(tf.square(pred_se_s - tar_se_s))
+                
+                primary_loss = (w.stress * loss_stress) + (w.convexity * loss_conv) + \
+                               (w.dynamic_convexity * loss_dyn) + (w.symmetry * loss_sym)
+
+            # Gradient Penalty Logic
+            grads_primary = tape_inner.gradient(primary_loss, self.model.trainable_variables)
+            grads_primary_safe = [g if g is not None else tf.zeros_like(v) 
+                                  for g, v in zip(grads_primary, self.model.trainable_variables)]
             
-            if do_dyn_conv and w.dynamic_convexity > 0:
-                loss_dyn = self._compute_convexity_loss(inp_dyn)
-
-            if do_symmetry and w.symmetry > 0:
-                with tf.GradientTape() as tape_sym:
-                    tape_sym.watch(inp_sym)
-                    pred_se_sym = self.model(inp_sym)
-                grads_sym = tape_sym.gradient(pred_se_sym, inp_sym)
-                if grads_sym is None: grads_sym = tf.zeros_like(inp_sym)
-                loss_sym = tf.reduce_mean(tf.square(grads_sym[:, 2]))
-
-            pred_se_s = self.model(inp_s)
-            loss_stress = tf.reduce_mean(tf.square(pred_se_s - tar_se_s))
+            gnorm_val = tf.linalg.global_norm(grads_primary_safe)
             
-            total_loss = (w.stress * loss_stress) + (w.convexity * loss_conv) + \
-                         (w.dynamic_convexity * loss_dyn) + (w.symmetry * loss_sym)
+            total_loss = primary_loss
+            if w.gradient_norm > 0:
+                total_loss += (w.gradient_norm * gnorm_val)
 
-        model_grads = model_tape.gradient(total_loss, self.model.trainable_variables)
-        gnorm_val = tf.linalg.global_norm(model_grads)
-        self.optimizer.apply_gradients(zip(model_grads, self.model.trainable_variables))
+        final_grads = tape_outer.gradient(total_loss, self.model.trainable_variables)
+        final_grads_safe = [g if g is not None else tf.zeros_like(v) 
+                            for g, v in zip(final_grads, self.model.trainable_variables)]
+        
+        self.optimizer.apply_gradients(zip(final_grads_safe, self.model.trainable_variables))
         
         return {
-            'loss': total_loss, 'l_se': loss_stress, 'l_r': 0.0, 
+            'loss': primary_loss, 'l_se': loss_stress, 'l_r': 0.0, 
             'l_conv': loss_conv, 'l_dyn': loss_dyn, 'l_sym': loss_sym, 
             'gnorm': gnorm_val
         }

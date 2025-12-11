@@ -19,7 +19,8 @@ symmetry:
   interval: 100       # Run every N steps (0 = every step)
 
 anisotropy_ratio:
-  enabled: true
+  # This decides if we go for dual stream of single one
+  enabled: true         # Enable R-value data loss
   batch_r_fraction: 0.1  # Fraction of batch for R-value data
   interval: 50           # Run every N steps (0 = every step)
 
@@ -30,15 +31,17 @@ model:
   use_icnn_constraints: false # Enforce ICNN constraints for convexity
 
 physics:  # synthetic Hill48 parameters
-  # F: 3.5
-  # G: 3.8
-  # H: 1.55
-  # N: 3.25
+  # This set corresponds to a von Mises model
   F: 0.5
   G: 0.5
   H: 0.5
   N: 1.5
-
+  # Alternative anisotropic set
+  # F: 3.5
+  # G: 3.8
+  # H: 1.55
+  # N: 3.25
+  
 training:
   k_folds: 1
   epochs: 100000
@@ -61,3 +64,4 @@ training:
     convexity: 1.0       # Weight for static data convexity
     dynamic_convexity: 1.0 # Weight for dynamic self-consistent convexity
     symmetry: 0.01        # Penalty for non-zero shear slope at equator
+    gradient_norm: 0.1   # Penalty for high gradient norms (0.0 to disable)
