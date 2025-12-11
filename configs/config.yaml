@@ -10,8 +10,8 @@ data:
 
 dynamic_convexity:
   enabled: true
-  samples: 100        # How many random points to probe per step
-  interval: 500       # Run dynamic check every N steps (0 = every step)
+  samples: 1000        # How many random points to probe per step
+  interval: 50       # Run dynamic check every N steps (0 = every step)
 
 symmetry:
   enabled: true
@@ -41,16 +41,23 @@ physics:  # synthetic Hill48 parameters
 
 training:
   k_folds: 1
-  epochs: 100000          # Acts as a "Max Epochs" safety limit
-  loss_threshold: 0.00005 # Stop if Total Loss drops below this
-  convexity_threshold: 0.001 # Stop if Convexity Loss drops below this
+  epochs: 100000
   batch_size: 16
   learning_rate: 0.001
+  save_dir: "outputs"
+  checkpoint_interval: 100
+
+  # --- STOPPING SWITCHES ---
+  # Training stops ONLY when ALL enabled thresholds are met.
+  # Set to null (or remove) to disable specific checks.
+  loss_threshold: 0.00005       # Main Stop: Total Loss (Stress + others)
+  convexity_threshold: 0.0005  # Safety Net: Max allowed negative eigenvalue
+  gnorm_threshold: 0.005        # Stability: Max allowed gradient norm | NOTE: There is no weight-loss directly connected to this switch.
+  r_threshold: 0.01            # Accuracy: Max allowed R-value error (approx 5%)
+
   weights:
     stress: 1.0
     r_value: 0.1          # Weight for R-value data
-    convexity: 0.01       # Weight for static data convexity
-    dynamic_convexity: 0.01 # Weight for dynamic self-consistent convexity
+    convexity: 1.0       # Weight for static data convexity
+    dynamic_convexity: 1.0 # Weight for dynamic self-consistent convexity
     symmetry: 0.01        # Penalty for non-zero shear slope at equator
-  save_dir: "outputs/"
-  checkpoint_interval: 100  # Save every 50 epochs (set to 0 to disable)

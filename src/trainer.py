@@ -433,13 +433,10 @@ class Trainer:
         print(f"Training Output Directory: {self.output_dir}", flush=True)
         
         # --- DETERMINE MODE ---
-        # FIX: Define n_uni before using it
         n_uni = self.config.data.samples.get('uniaxial', 0)
-        
         w_r = self.config.training.weights.r_value
         ani_config = self.config.anisotropy_ratio
         
-        # Dual stream requires: Uniaxial samples exist, Weight > 0, Fraction > 0, and Enabled
         use_dual_stream = (n_uni > 0) and (w_r > 0) and (ani_config.batch_r_fraction > 0) and ani_config.enabled
 
         if ds_phys is not None and use_dual_stream:
@@ -455,8 +452,12 @@ class Trainer:
         conf_sym = self.config.symmetry
         conf_ani = self.config.anisotropy_ratio
         w = self.config.training.weights
+        
+        # --- STOPPING THRESHOLDS ---
         stop_loss = self.config.training.loss_threshold
         stop_conv = self.config.training.convexity_threshold
+        stop_gnorm = self.config.training.gnorm_threshold
+        stop_r = self.config.training.r_threshold
         
         global_step = self.start_epoch * steps 
         best_metric = float('inf')
@@ -491,44 +492,48 @@ class Trainer:
             
             self.history.append(row)
             
-            # --- DETAILED LOGGING RESTORED ---
             if epoch % 5 == 0 or epoch == 1:
                 log_str = (f"Ep {epoch}: Loss {row['train_loss']:.5f} | "
                            f"SE: {row['train_l_se']:.5f} | R: {row['train_l_r']:.5f} | "
-                           f"Cv: {row['train_l_conv']:.1e} | Dy: {row['train_l_dyn']:.1e} | "
-                           f"Sy: {row['train_l_sym']:.1e} | G: {row['train_gnorm']:.5f}")
+                           f"Cv: {row['train_l_conv']:.1e} | D-Cv: {row['train_l_dyn']:.1e} | "
+                           f"Sym: {row['train_l_sym']:.1e} | G: {row['train_gnorm']:.5f}")
                 print(log_str, flush=True)
 
-            # --- SAVE CSV INSIDE LOOP ---
             pd.DataFrame(self.history).to_csv(os.path.join(self.output_dir, "loss_history.csv"), index=False)
 
             if row['train_loss'] < best_metric:
                 best_metric = row['train_loss']
                 self._save_checkpoint(epoch, is_best=True)
             
-            # --- Checkpoint Interval ---
             ckpt_interval = self.config.training.checkpoint_interval
             if ckpt_interval > 0 and epoch % ckpt_interval == 0:
                 self._save_checkpoint(epoch, is_best=False)
 
-            # if stop_loss is not None and row['train_loss'] <= stop_loss:
-            #     print(f"\n[Stop] Target loss {stop_loss} reached at epoch {epoch}.", flush=True)
-            #     self._save_checkpoint(epoch, is_best=True)
-            #     break
-            # --- DUAL STOPPING CONDITION ---
-            has_loss_limit = stop_loss is not None
-            has_conv_limit = stop_conv is not None
+            # --- 4-WAY STOPPING CONDITION ---
+            # 1. Total Loss
+            pass_loss = (stop_loss is None) or (row['train_loss'] <= stop_loss)
             
-            # Logic: If limit is None, we consider it "met" by default
-            loss_met = (not has_loss_limit) or (row['train_loss'] <= stop_loss)
-            conv_met = (not has_conv_limit) or (row['train_l_conv'] <= stop_conv)
+            # 2. Convexity (Safety)
+            pass_conv = (stop_conv is None) or \
+                        ((row['train_l_conv'] <= stop_conv) and (row['train_l_dyn'] <= stop_conv))
+            
+            # 3. Gradient Norm (Stability)
+            pass_gnorm = (stop_gnorm is None) or (row['train_gnorm'] <= stop_gnorm)
+            
+            # 4. R-value (Accuracy - Only if weight > 0)
+            pass_r = True
+            if stop_r is not None and w.r_value > 0:
+                pass_r = (row['train_l_r'] <= stop_r)
 
-            # Stop only if defined criteria are met
-            if (has_loss_limit or has_conv_limit) and loss_met and conv_met:
-                print(f"\n[Stop] Targets reached at epoch {epoch}.", flush=True)
-                print(f"       Loss: {row['train_loss']:.5f} (Target: {stop_loss})")
-                if has_conv_limit:
-                    print(f"       Conv: {row['train_l_conv']:.2e} (Target: {stop_conv})")
+            # Check if ANY threshold is actually set to control the stop
+            any_limit_set = (stop_loss or stop_conv or stop_gnorm or stop_r)
+
+            if any_limit_set and pass_loss and pass_conv and pass_gnorm and pass_r:
+                print(f"\n[Stop] All targets reached at epoch {epoch}.", flush=True)
+                print(f"       Loss: {row['train_loss']:.5f} (Limit: {stop_loss})")
+                if stop_conv: print(f"       Conv (Stat/Dyn): {row['train_l_conv']:.2e} / {row['train_l_dyn']:.2e} (Limit: {stop_conv})")
+                if stop_gnorm: print(f"       Gnorm: {row['train_gnorm']:.2f} (Limit: {stop_gnorm})")
+                if stop_r and w.r_value > 0: print(f"       R-val: {row['train_l_r']:.5f} (Limit: {stop_r})")
                 
                 self._save_checkpoint(epoch, is_best=True)
                 break

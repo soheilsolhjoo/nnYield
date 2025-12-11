@@ -6,7 +6,7 @@ from typing import List, Optional
 class DataConfig:
     type: str
     symmetry: bool
-    samples: dict  # {'loci': int, 'uniaxial': int}
+    samples: dict 
     input_range: List[float]
 
 @dataclass
@@ -26,7 +26,7 @@ class ModelConfig:
     hidden_layers: List[int]
     activation: str
     ref_stress: float
-    use_icnn_constraints: bool = False  # <--- NEW: ICNN Switch
+    use_icnn_constraints: bool
 
 @dataclass
 class PhysicsConfig:
@@ -48,7 +48,9 @@ class TrainingConfig:
     k_folds: int
     epochs: int
     loss_threshold: float
-    convexity_threshold: float
+    convexity_threshold: float  # Safety Net
+    gnorm_threshold: float      # Stability
+    r_threshold: float          # Physics Accuracy
     batch_size: int
     learning_rate: float
     weights: WeightsConfig
@@ -74,10 +76,6 @@ class Config:
 
     @classmethod
     def from_dict(cls, data: dict):
-        """
-        Parses a dictionary into the strictly typed Config object.
-        Useful for loading config from a saved checkpoint.
-        """
         return cls(
             experiment_name=data['experiment_name'],
             data=DataConfig(**data['data']),
@@ -96,6 +94,8 @@ class Config:
                 epochs=data['training']['epochs'],
                 loss_threshold=data['training']['loss_threshold'],
                 convexity_threshold=data['training']['convexity_threshold'],
+                gnorm_threshold=data['training']['gnorm_threshold'],
+                r_threshold=data['training']['r_threshold'],
                 batch_size=data['training']['batch_size'],
                 learning_rate=data['training']['learning_rate'],
                 save_dir=data['training']['save_dir'],
@@ -105,11 +105,9 @@ class Config:
         )
 
     def to_dict(self):
-        """Converts the config back to a dictionary (for saving)."""
         return asdict(self)
 
     def get_model_architecture(self):
-        """Helper to extract only architecture-relevant params."""
         return {
             'hidden_layers': self.model.hidden_layers,
             'activation': self.model.activation,
@@ -117,6 +115,5 @@ class Config:
             'output_dim': 1 
         }
 
-# --- Usage Helper ---
 def load_config(path: str) -> Config:
     return Config.from_yaml(path)
