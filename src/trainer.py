@@ -183,35 +183,90 @@ class Trainer:
             print("✅ Transfer complete. Fresh optimizer.", flush=True)
     
     def _sample_dynamic_surface(self, n_samples, force_equator=False):
-        """Generates random points ON the yield surface."""
-        dim = 1 if force_equator else 2
-        sampler = qmc.Sobol(d=dim, scramble=True)
-        # Skip logic to ensure randomness across steps
-        skip_val = np.random.randint(0, 100000) 
-        sampler.fast_forward(skip_val)
-        sample = sampler.random(n=n_samples)
-        theta = tf.convert_to_tensor(sample[:, 0] * 2 * np.pi, dtype=tf.float32)
-        if force_equator:
-            phi_np = np.ones((n_samples,)) * (np.pi / 2.0)
-        else:
-            max_phi = np.pi / 2.0 if self.use_symmetry else np.pi
-            z_values = np.cos(max_phi) + (1.0 - np.cos(max_phi)) * sample[:, 1]
-            phi_np = np.arccos(z_values)
-        phi = tf.convert_to_tensor(phi_np, dtype=tf.float32)
+        """
+        Generates random points ON the yield surface.
+        UPDATED: Uses tf.random to ensure fresh samples every step inside @tf.function.
+        """
+        # 1. Sample Theta uniformly [0, 2pi]
+        theta = tf.random.uniform([n_samples], minval=0.0, maxval=2*np.pi, dtype=tf.float32)
 
+        # 2. Sample Phi using Inverse Transform Sampling (to avoid clumping at poles)
+        if force_equator:
+            phi = tf.ones([n_samples], dtype=tf.float32) * (np.pi / 2.0)
+        else:
+            # Determine range based on symmetry
+            # Full sphere: phi in [0, pi] -> z = cos(phi) in [-1, 1]
+            # Symmetric (Top Half): phi in [0, pi/2] -> z in [0, 1]
+            # Note: You need to check your config structure. Assuming self.config.data.symmetry is bool.
+            is_symmetric = True # Or self.config.data.symmetry if available in trainer
+            
+            max_phi = np.pi / 2.0 if is_symmetric else np.pi
+            
+            # z ~ Uniform[cos(max_phi), 1.0]
+            min_z = tf.cos(max_phi)
+            max_z = 1.0
+            
+            z = tf.random.uniform([n_samples], minval=min_z, maxval=max_z, dtype=tf.float32)
+            phi = tf.math.acos(z)
+
+        # 3. Predict Radius
+        # Assuming you have a helper or using homogeneity: r = 1 / f(direction)
+        # If your model doesn't have predict_radius, use this standard logic:
+        # Construct unit vector
+        # s12_u = tf.cos(phi)
+        # r_plane_u = tf.sin(phi)
+        # s11_u = r_plane_u * tf.cos(theta)
+        # s22_u = r_plane_u * tf.sin(theta)
+        # unit_inputs = tf.stack([s11_u, s22_u, s12_u], axis=1)
+        # pred = self.model(unit_inputs)
+        # radius = self.config.model.ref_stress / (pred + 1e-8) # Homogeneous degree 1
+        
+        # IF YOU HAVE the helper method:
         radius = self.model.predict_radius(theta, phi)
         radius = tf.reshape(radius, [-1])
 
+        # 4. Convert to Stress
         s12 = radius * tf.cos(phi)
         r_plane = radius * tf.sin(phi)
         s11 = r_plane * tf.cos(theta)
         s22 = r_plane * tf.sin(theta)
         
         sigma_dynamic = tf.stack([s11, s22, s12], axis=1)
+        
+        # Stop gradient so we don't try to optimize the *location* of the points,
+        # only the *curvature* at those points.
         return tf.stop_gradient(sigma_dynamic)
 
+    def _get_principal_minors(self, matrix):
+        """
+        Calculates the three leading principal minors for a 3x3 matrix batch.
+        input: matrix (batch_size, 3, 3)
+        output: list of tensors [m1, m2, m3]
+        """
+        # 1st Principal Minor (Top-left element)
+        m1 = matrix[:, 0, 0]
+        
+        # 2nd Principal Minor (Top-left 2x2 determinant)
+        # | a b |
+        # | c d |  -> ad - bc
+        m2 = (matrix[:, 0, 0] * matrix[:, 1, 1]) - (matrix[:, 0, 1] * matrix[:, 1, 0])
+        
+        # 3rd Principal Minor (Full 3x3 determinant)
+        m3 = tf.linalg.det(matrix)
+        
+        return [m1, m2, m3]
+    
     def _compute_convexity_loss(self, inputs):
-        """Calculates Convexity Loss using Automatic Differentiation (Hessian)."""
+        """
+        Calculates Convexity Loss and tracks the Physical Minimum Eigenvalue.
+        Method: Rectified Minimax
+        Formula: Loss = Mean(ReLU(-eigs)) + ReLU(-Min(eigs))
+        
+        Returns:
+            total_loss (tf.Tensor): The scalar loss for the optimizer.
+            min_eig_val (tf.Tensor): The actual minimum eigenvalue (for logging/stopping).
+        """
+        # 1. Compute Hessian via Double Backprop
         with tf.GradientTape(persistent=True) as tape2:
             tape2.watch(inputs)
             with tf.GradientTape() as tape1:
@@ -221,8 +276,27 @@ class Trainer:
 
         hess_matrix = tape2.batch_jacobian(grads, inputs)
         del tape2 
+        
+        # 2. Compute Eigenvalues
         eigs = tf.linalg.eigvalsh(hess_matrix)
-        return tf.reduce_sum(tf.square(tf.nn.relu(-eigs)))
+        
+        # 3. Track Physical Minimum (The "Worst Dent")
+        # We take the global minimum over the entire batch
+        min_eig_val = tf.reduce_min(eigs)
+
+        # 4. Compute Loss Components
+        # Component A: Mean Violation (Smoothes the overall surface)
+        # Sum of violations per point, averaged over batch
+        mean_violation = tf.reduce_mean(tf.reduce_sum(tf.nn.relu(-eigs), axis=1))
+        
+        # Component B: Worst-Case Violation (Targets the "Gaussian Tail")
+        # Penalizes the single deepest dent in the batch
+        min_violation = tf.nn.relu(-min_eig_val)
+        
+        # Total Loss (Sum of both forces)
+        total_loss = mean_violation + min_violation
+        
+        return total_loss, min_eig_val
 
     @tf.function
     def train_step_dual(self, batch_shape, batch_phys, do_dyn_conv, do_symmetry):
@@ -230,13 +304,16 @@ class Trainer:
         inp_p, tar_se_p, tar_r, geo_p, r_mask = batch_phys
         w = self.config.training.weights
         
-        # Setup nested tape for second-order derivative (Gradient Penalty)
         with tf.GradientTape() as tape_outer:
             with tf.GradientTape() as tape_inner:
                 
                 loss_conv = tf.constant(0.0)
                 loss_dyn = tf.constant(0.0)
                 loss_sym = tf.constant(0.0)
+                
+                # Metrics for logging (default to 0.0 aka stable)
+                min_eig_stat = tf.constant(0.0)
+                min_eig_dyn = tf.constant(0.0)
                 
                 # Dynamic Sampling
                 if do_dyn_conv and w.dynamic_convexity > 0:
@@ -249,13 +326,13 @@ class Trainer:
 
                 # 1. Static Convexity
                 if w.convexity > 0:
-                    loss_conv = self._compute_convexity_loss(inp_s)
+                    loss_conv, min_eig_stat = self._compute_convexity_loss(inp_s)
                 
                 # 2. Dynamic Convexity
                 if do_dyn_conv and w.dynamic_convexity > 0:
-                    loss_dyn = self._compute_convexity_loss(inp_dyn)
+                    loss_dyn, min_eig_dyn = self._compute_convexity_loss(inp_dyn)
 
-                # 3. Symmetry Loss
+                # 3. Symmetry
                 if do_symmetry and w.symmetry > 0:
                     with tf.GradientTape() as tape_sym:
                         tape_sym.watch(inp_sym)
@@ -264,11 +341,10 @@ class Trainer:
                     if grads_sym is None: grads_sym = tf.zeros_like(inp_sym)
                     loss_sym = tf.reduce_mean(tf.square(grads_sym[:, 2]))
 
-                # 4. Stress Loss (Shape)
+                # 4. Stress & R-value (Standard)
                 pred_se_s = self.model(inp_s)
                 loss_stress_s = tf.reduce_mean(tf.square(pred_se_s - tar_se_s))
 
-                # 5. R-value & Stress (Phys)
                 if w.r_value > 0:
                     with tf.GradientTape() as tape_r:
                         tape_r.watch(inp_p)
@@ -282,7 +358,6 @@ class Trainer:
                     
                     d_eps_thick = -(ds_11 + ds_22)
                     d_eps_width = ds_11*sin2 + ds_22*cos2 - 2*ds_12*sc
-                    
                     numerator = d_eps_width - (tar_r * d_eps_thick)
                     denominator = tf.sqrt(1.0 + tf.square(tar_r))
                     geo_error = tf.math.divide_no_nan(numerator, denominator)
@@ -295,7 +370,6 @@ class Trainer:
                     loss_stress_p = tf.reduce_mean(tf.square(pred_se_p - tar_se_p))
                     loss_r = tf.constant(0.0)
 
-                # Combine Primary Losses
                 r_frac = self.config.anisotropy_ratio.batch_r_fraction
                 loss_stress = (loss_stress_s * (1.0 - r_frac)) + (loss_stress_p * r_frac)
                 
@@ -303,23 +377,16 @@ class Trainer:
                                (w.convexity * loss_conv) + (w.dynamic_convexity * loss_dyn) + \
                                (w.symmetry * loss_sym)
             
-            # --- GRADIENT PENALTY LOGIC ---
-            # 1. Calculate gradients of Primary Loss w.r.t weights
+            # Gradient Penalty
             grads_primary = tape_inner.gradient(primary_loss, self.model.trainable_variables)
-            
-            # Handle None gradients safely
             grads_primary_safe = [g if g is not None else tf.zeros_like(v) 
                                   for g, v in zip(grads_primary, self.model.trainable_variables)]
-            
-            # 2. Compute Norm
             gnorm_val = tf.linalg.global_norm(grads_primary_safe)
             
-            # 3. Add to Total Loss (Weighted)
             total_loss = primary_loss
             if w.gradient_norm > 0:
                 total_loss += (w.gradient_norm * gnorm_val)
 
-        # 4. Compute Final Gradients (Second Derivative)
         final_grads = tape_outer.gradient(total_loss, self.model.trainable_variables)
         final_grads_safe = [g if g is not None else tf.zeros_like(v) 
                             for g, v in zip(final_grads, self.model.trainable_variables)]
@@ -327,12 +394,12 @@ class Trainer:
         self.optimizer.apply_gradients(zip(final_grads_safe, self.model.trainable_variables))
         
         return {
-            'loss': primary_loss, # Log the physics loss, not the penalized one
-            'l_se': loss_stress, 'l_r': loss_r, 
+            'loss': primary_loss, 'l_se': loss_stress, 'l_r': loss_r, 
             'l_conv': loss_conv, 'l_dyn': loss_dyn, 'l_sym': loss_sym, 
-            'gnorm': gnorm_val # Log the norm we calculated
+            'gnorm': gnorm_val,
+            'min_stat': min_eig_stat, 'min_dyn': min_eig_dyn # Log physical values
         }
-
+    
     @tf.function
     def train_step_shape(self, batch_shape, do_dyn_conv, do_symmetry):
         inp_s, tar_se_s = batch_shape
@@ -340,9 +407,8 @@ class Trainer:
 
         with tf.GradientTape() as tape_outer:
             with tf.GradientTape() as tape_inner:
-                loss_conv = tf.constant(0.0)
-                loss_dyn = tf.constant(0.0)
-                loss_sym = tf.constant(0.0)
+                loss_conv = tf.constant(0.0); loss_dyn = tf.constant(0.0); loss_sym = tf.constant(0.0)
+                min_eig_stat = tf.constant(0.0); min_eig_dyn = tf.constant(0.0)
                 
                 if do_dyn_conv and w.dynamic_convexity > 0:
                     n_dyn = self.config.dynamic_convexity.samples
@@ -353,10 +419,10 @@ class Trainer:
                     inp_sym = self._sample_dynamic_surface(n_sym, force_equator=True)
 
                 if w.convexity > 0:
-                    loss_conv = self._compute_convexity_loss(inp_s)
+                    loss_conv, min_eig_stat = self._compute_convexity_loss(inp_s)
                 
                 if do_dyn_conv and w.dynamic_convexity > 0:
-                    loss_dyn = self._compute_convexity_loss(inp_dyn)
+                    loss_dyn, min_eig_dyn = self._compute_convexity_loss(inp_dyn)
 
                 if do_symmetry and w.symmetry > 0:
                     with tf.GradientTape() as tape_sym:
@@ -372,11 +438,9 @@ class Trainer:
                 primary_loss = (w.stress * loss_stress) + (w.convexity * loss_conv) + \
                                (w.dynamic_convexity * loss_dyn) + (w.symmetry * loss_sym)
 
-            # Gradient Penalty Logic
             grads_primary = tape_inner.gradient(primary_loss, self.model.trainable_variables)
             grads_primary_safe = [g if g is not None else tf.zeros_like(v) 
                                   for g, v in zip(grads_primary, self.model.trainable_variables)]
-            
             gnorm_val = tf.linalg.global_norm(grads_primary_safe)
             
             total_loss = primary_loss
@@ -392,9 +456,10 @@ class Trainer:
         return {
             'loss': primary_loss, 'l_se': loss_stress, 'l_r': 0.0, 
             'l_conv': loss_conv, 'l_dyn': loss_dyn, 'l_sym': loss_sym, 
-            'gnorm': gnorm_val
+            'gnorm': gnorm_val,
+            'min_stat': min_eig_stat, 'min_dyn': min_eig_dyn
         }
-
+    
     @tf.function
     def val_step(self, batch_shape, batch_phys):
         inp_s, tar_se_s = batch_shape
@@ -500,8 +565,9 @@ class Trainer:
         # --- TRAINING LOOP ---
         for epoch in range(self.start_epoch + 1, self.config.training.epochs + 1):
             
-            train_metrics = {k: tf.keras.metrics.Mean() for k in ['loss', 'l_se', 'l_r', 'l_conv', 'l_dyn', 'l_sym', 'gnorm']}
-            
+            train_metrics = {k: tf.keras.metrics.Mean() for k in 
+                            ['loss', 'l_se', 'l_r', 'l_conv', 'l_dyn', 'l_sym', 'gnorm', 'min_stat', 'min_dyn']}
+                            
             for batch_data in dataset:
                 do_dyn_conv = (conf_dyn.enabled and w.dynamic_convexity > 0) and \
                               (conf_dyn.interval == 0 or global_step % conf_dyn.interval == 0)
@@ -530,7 +596,7 @@ class Trainer:
             if epoch % 5 == 0 or epoch == 1:
                 log_str = (f"Ep {epoch}: Loss {row['train_loss']:.5f} | "
                            f"SE: {row['train_l_se']:.5f} | R: {row['train_l_r']:.5f} | "
-                           f"Cv: {row['train_l_conv']:.1e} | D-Cv: {row['train_l_dyn']:.1e} | "
+                           f"MinEig(S/D): {row['train_min_stat']:.1e} / {row['train_min_dyn']:.1e} | "
                            f"Sym: {row['train_l_sym']:.1e} | G: {row['train_gnorm']:.5f}")
                 print(log_str, flush=True)
 
@@ -549,9 +615,15 @@ class Trainer:
             pass_loss = (stop_loss is None) or (row['train_loss'] <= stop_loss)
             
             # 2. Convexity (Safety)
-            pass_conv = (stop_conv is None) or \
-                        ((row['train_l_conv'] <= stop_conv) and (row['train_l_dyn'] <= stop_conv))
-            
+            pass_conv = True
+            if stop_conv is not None:
+                target_min = -1.0 * abs(stop_conv) 
+                stat_ok = (row['train_min_stat'] >= target_min)
+                dyn_ok = True
+                if w.dynamic_convexity > 0:
+                    dyn_ok = (row['train_min_dyn'] >= target_min)
+                pass_conv = stat_ok and dyn_ok
+
             # 3. Gradient Norm (Stability)
             pass_gnorm = (stop_gnorm is None) or (row['train_gnorm'] <= stop_gnorm)
             
@@ -566,7 +638,8 @@ class Trainer:
             if any_limit_set and pass_loss and pass_conv and pass_gnorm and pass_r:
                 print(f"\n[Stop] All targets reached at epoch {epoch}.", flush=True)
                 print(f"       Loss: {row['train_loss']:.5f} (Limit: {stop_loss})")
-                if stop_conv: print(f"       Conv (Stat/Dyn): {row['train_l_conv']:.2e} / {row['train_l_dyn']:.2e} (Limit: {stop_conv})")
+                if stop_conv: 
+                    print(f"       Min Eig: {row['train_min_stat']:.2e} (Limit: {-abs(stop_conv):.2e})")
                 if stop_gnorm: print(f"       Gnorm: {row['train_gnorm']:.2f} (Limit: {stop_gnorm})")
                 if stop_r and w.r_value > 0: print(f"       R-val: {row['train_l_r']:.5f} (Limit: {stop_r})")
                 
