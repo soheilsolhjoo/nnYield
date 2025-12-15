@@ -198,7 +198,8 @@ class Trainer:
             # Full sphere: phi in [0, pi] -> z = cos(phi) in [-1, 1]
             # Symmetric (Top Half): phi in [0, pi/2] -> z in [0, 1]
             # Note: You need to check your config structure. Assuming self.config.data.symmetry is bool.
-            is_symmetric = True # Or self.config.data.symmetry if available in trainer
+            # is_symmetric = True # Or self.config.data.symmetry if available in trainer  
+            is_symmetric = self.config.data.symmetry
             
             max_phi = np.pi / 2.0 if is_symmetric else np.pi
             
@@ -301,7 +302,8 @@ class Trainer:
     @tf.function
     def train_step_dual(self, batch_shape, batch_phys, do_dyn_conv, do_symmetry):
         inp_s, tar_se_s = batch_shape
-        inp_p, tar_se_p, tar_r, geo_p, r_mask = batch_phys
+        # UPDATED: Unpack the new target 'tar_se_p_stress' (experimental yield stress for uniaxial points)
+        inp_p, tar_se_p, tar_r, geo_p, r_mask, tar_se_p_stress = batch_phys 
         w = self.config.training.weights
         
         with tf.GradientTape() as tape_outer:
@@ -345,6 +347,8 @@ class Trainer:
                 pred_se_s = self.model(inp_s)
                 loss_stress_s = tf.reduce_mean(tf.square(pred_se_s - tar_se_s))
 
+                loss_stress_uni = tf.constant(0.0) # Initialize new loss term
+
                 if w.r_value > 0:
                     with tf.GradientTape() as tape_r:
                         tape_r.watch(inp_p)
@@ -364,14 +368,21 @@ class Trainer:
                     
                     masked_sq_error = tf.square(geo_error) * r_mask
                     loss_r = tf.reduce_sum(masked_sq_error) / (tf.reduce_sum(r_mask) + 1e-8)
-                    loss_stress_p = tf.reduce_mean(tf.square(pred_se_p - tar_se_p))
+                    
+                    # UPDATED: Compute Stress Loss for Uniaxial Points
+                    # We use the same 'pred_se_p' (prediction at uniaxial points)
+                    # and compare it against the experimental yield stress 'tar_se_p_stress'
+                    loss_stress_uni = tf.reduce_mean(tf.square(pred_se_p - tar_se_p_stress))
+                    
                 else:
                     pred_se_p = self.model(inp_p)
-                    loss_stress_p = tf.reduce_mean(tf.square(pred_se_p - tar_se_p))
+                    # If R-value is disabled, we still check the stress at these points
+                    loss_stress_uni = tf.reduce_mean(tf.square(pred_se_p - tar_se_p_stress))
                     loss_r = tf.constant(0.0)
 
                 r_frac = self.config.anisotropy_ratio.batch_r_fraction
-                loss_stress = (loss_stress_s * (1.0 - r_frac)) + (loss_stress_p * r_frac)
+                # UPDATED: Combine Shape Stress Loss and Uniaxial Stress Loss
+                loss_stress = (loss_stress_s * (1.0 - r_frac)) + (loss_stress_uni * r_frac)
                 
                 primary_loss = (w.stress * loss_stress) + (w.r_value * loss_r) + \
                                (w.convexity * loss_conv) + (w.dynamic_convexity * loss_dyn) + \
@@ -463,7 +474,8 @@ class Trainer:
     @tf.function
     def val_step(self, batch_shape, batch_phys):
         inp_s, tar_se_s = batch_shape
-        inp_p, tar_se_p, tar_r, geo_p, r_mask = batch_phys
+        # UPDATED: Unpack new target
+        inp_p, tar_se_p, tar_r, geo_p, r_mask, tar_se_p_stress = batch_phys
         
         # Access weights via dot notation
         w = self.config.training.weights
@@ -471,14 +483,14 @@ class Trainer:
         # 1. Static Convexity Check
         loss_conv = tf.constant(0.0)
         if w.convexity > 0:
-             loss_conv = self._compute_convexity_loss(inp_s)
+             loss_conv = self._compute_convexity_loss(inp_s)[0] # Only take loss, ignore min_eig
         
         # 2. Shape Stress Loss
         pred_se_s = self.model(inp_s)
         loss_stress_s = tf.reduce_mean(tf.square(pred_se_s - tar_se_s))
         
         loss_r = tf.constant(0.0)
-        loss_stress_p = tf.constant(0.0)
+        loss_stress_uni = tf.constant(0.0)
         
         # 3. Anisotropy / Physical Loss
         if w.r_value > 0:
@@ -502,15 +514,18 @@ class Trainer:
             
             # Masked Mean Squared Error for R-values
             loss_r = tf.reduce_sum(tf.square(geo_error) * r_mask) / (tf.reduce_sum(r_mask) + 1e-8)
-            loss_stress_p = tf.reduce_mean(tf.square(pred_se_p - tar_se_p))
+            
+            # UPDATED: Compute Uniaxial Stress Loss
+            loss_stress_uni = tf.reduce_mean(tf.square(pred_se_p - tar_se_p_stress))
         else:
             # If R-value weight is 0, just compute stress loss on physical batch
             pred_se_p = self.model(inp_p)
-            loss_stress_p = tf.reduce_mean(tf.square(pred_se_p - tar_se_p))
+            loss_stress_uni = tf.reduce_mean(tf.square(pred_se_p - tar_se_p_stress))
 
         # 4. Combine Stress Losses
         r_frac = self.config.anisotropy_ratio.batch_r_fraction
-        loss_stress = (loss_stress_s * (1.0 - r_frac)) + (loss_stress_p * r_frac)
+        # UPDATED: Combine
+        loss_stress = (loss_stress_s * (1.0 - r_frac)) + (loss_stress_uni * r_frac)
         
         # Total Validation Loss
         # Note: We typically don't run dynamic checks (convexity/symmetry) in validation for speed

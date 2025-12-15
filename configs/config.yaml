@@ -5,8 +5,8 @@ data:
   symmetry: true      # Set to true to enforce s12>=0, false for full range
   samples:
     loci: 200         # For shape/convexity (Mask=0)
-    uniaxial: 100     # For R-values (Mask=1)
-  input_range: [-2.0, 2.0]
+    uniaxial: 10     # For R-values (Mask=1)
+  input_range: [-1.0, 1.0]
 
 dynamic_convexity:
   enabled: true
@@ -21,8 +21,8 @@ symmetry:
 anisotropy_ratio:
   # This decides if we go for dual stream of single one
   enabled: true         # Enable R-value data loss
-  batch_r_fraction: 0.1  # Fraction of batch for R-value data
-  interval: 50           # Run every N steps (0 = every step)
+  batch_r_fraction: 0.2  # Fraction of batch for R-value data
+  interval: 10           # Run every N steps (0 = every step)
 
 model:
   hidden_layers: [32, 16, 8]
@@ -53,9 +53,9 @@ training:
   # --- STOPPING SWITCHES ---
   # Training stops ONLY when ALL enabled thresholds are met.
   # Set to null (or remove) to disable specific checks.
-  loss_threshold: 0.00005       # Main Stop: Total Loss (Stress + others)
+  loss_threshold: 0.001       # Main Stop: Total Loss (Stress + others)
   gnorm_threshold: 0.01        # Stability: Max allowed gradient norm | NOTE: There is no weight-loss directly connected to this switch.
-  r_threshold: 0.005            # Accuracy: Max allowed R-value error (approx 5%)
+  r_threshold: 0.001            # Accuracy: Max allowed R-value error (approx 5%)
   # convexity_threshold: Target for PHYSICAL MIN EIGENVALUE
   # Set this to the "Maximum Allowed Dent Depth".
   # Example: 2.0e-4 means "Stop only if Min Eigenvalue >= -0.0002"
@@ -66,5 +66,5 @@ training:
     r_value: 1.0          # Weight for R-value data
     convexity: 10.0       # Weight for static data convexity
     dynamic_convexity: 100.0 # Weight for dynamic self-consistent convexity
-    symmetry: 0.01        # Penalty for non-zero shear slope at equator
-    gradient_norm: 0.1   # Penalty for high gradient norms (0.0 to disable)
+    symmetry: 0.1        # Penalty for non-zero shear slope at equator
+    gradient_norm: 1.0   # Penalty for high gradient norms (0.0 to disable)
