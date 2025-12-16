@@ -1,4 +1,4 @@
-experiment_name: "von_mises_test"
+experiment_name: "von_mises_all"
 
 data:
   type: "synthetic"   # Options: synthetic, csv
@@ -10,8 +10,8 @@ data:
 
 dynamic_convexity:
   enabled: true
-  samples: 2000        # How many random points to probe per step
-  interval: 10       # Run dynamic check every N steps (0 = every step)
+  samples: 1000        # How many random points to probe per step
+  interval: 100       # Run dynamic check every N steps (0 = every step)
 
 symmetry:
   enabled: true
@@ -25,7 +25,7 @@ anisotropy_ratio:
   interval: 10           # Run every N steps (0 = every step)
 
 model:
-  hidden_layers: [32, 16, 8]
+  hidden_layers: [8, 8, 8, 8]  # Number of neurons per hidden layer
   activation: "softplus" # Must be smooth (no ReLU)
   ref_stress: 1.0
   use_icnn_constraints: false # Enforce ICNN constraints for convexity
@@ -53,9 +53,9 @@ training:
   # --- STOPPING SWITCHES ---
   # Training stops ONLY when ALL enabled thresholds are met.
   # Set to null (or remove) to disable specific checks.
-  loss_threshold: 0.001       # Main Stop: Total Loss (Stress + others)
+  loss_threshold: 0.01       # Main Stop: Total Loss (Stress + others)
   gnorm_threshold: 0.01        # Stability: Max allowed gradient norm | NOTE: There is no weight-loss directly connected to this switch.
-  r_threshold: 0.001            # Accuracy: Max allowed R-value error (approx 5%)
+  r_threshold: 0.01            # Accuracy: Max allowed R-value error (approx 5%)
   # convexity_threshold: Target for PHYSICAL MIN EIGENVALUE
   # Set this to the "Maximum Allowed Dent Depth".
   # Example: 2.0e-4 means "Stop only if Min Eigenvalue >= -0.0002"
@@ -63,8 +63,8 @@ training:
 
   weights:
     stress: 1.0
-    r_value: 1.0          # Weight for R-value data
-    convexity: 10.0       # Weight for static data convexity
-    dynamic_convexity: 100.0 # Weight for dynamic self-consistent convexity
+    r_value: 5.0          # Weight for R-value data
+    convexity: 1.0       # Weight for static data convexity
+    dynamic_convexity: 1.0 # Weight for dynamic self-consistent convexity
     symmetry: 0.1        # Penalty for non-zero shear slope at equator
     gradient_norm: 1.0   # Penalty for high gradient norms (0.0 to disable)

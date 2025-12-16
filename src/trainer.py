@@ -1,16 +1,18 @@
 import tensorflow as tf
 from scipy.stats import qmc
 import os
+import shutil
+import yaml # Needed to write the updated config
 import pandas as pd
 import numpy as np
 import pickle
 import glob
 from .model import HomogeneousYieldModel
 from .data_loader import YieldDataLoader
-from .config import Config  # Import the strictly typed Config class
+from .config import Config
 
 class Trainer:
-    def __init__(self, config: Config, resume_path=None, transfer_path=None, fold_idx=None):
+    def __init__(self, config: Config, config_path=None, resume_path=None, transfer_path=None, fold_idx=None):
         self.config = config
         self.start_epoch = 0
         self.history = []
@@ -23,35 +25,26 @@ class Trainer:
         else:
             self.output_dir = base_dir
         
-        # Define Checkpoint Subfolder
         self.ckpt_dir = os.path.join(self.output_dir, "checkpoints")
 
-        # --- SAFETY CHECK & CREATION ---
+        # --- SAFETY CHECKS ---
         if not resume_path:
-            # If we are NOT resuming, check if folder exists and is populated
             if os.path.exists(self.output_dir):
                 has_history = os.path.exists(os.path.join(self.output_dir, "loss_history.csv"))
                 has_weights = os.path.exists(os.path.join(self.output_dir, "best_model.weights.h5"))
-                
                 if has_history or has_weights:
-                    raise FileExistsError(
-                        f"⛔ Output directory '{self.output_dir}' already contains training data.\n"
-                        "   Action required: Change 'experiment_name' in config, delete the folder, or use --resume."
-                    )
+                    raise FileExistsError(f"⛔ Output directory '{self.output_dir}' exists. Use --resume or change experiment_name.")
 
             os.makedirs(self.output_dir, exist_ok=True)
             os.makedirs(self.ckpt_dir, exist_ok=True) 
-            
-            # Save config for fresh run (only if main run or fold 1)
-            if fold_idx is None or fold_idx == 1:
-                with open(os.path.join(base_dir, "config.yaml"), 'w') as f:
-                    import yaml
-                    yaml.dump(config.to_dict(), f)
 
         # --- 2. INITIALIZE OPTIMIZER ---
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=config.training.learning_rate)
 
-        # --- 3. HANDLE CHECKPOINTS ---
+        # --- 3. LOAD CHECKPOINTS / TRANSFER (Architecture Update) ---
+        # We do this BEFORE saving the config so we know if architecture changed.
+        config_was_modified = False
+        
         if resume_path:
             print(f"🔄 Resuming from: {resume_path}", flush=True)
             self._load_checkpoint(resume_path, mode='resume')
@@ -60,14 +53,43 @@ class Trainer:
         
         elif transfer_path:
             print(f"🚀 Transfer Learning from: {transfer_path}", flush=True)
+            # This updates self.config.model with settings from the file
             self._load_checkpoint(transfer_path, mode='transfer')
+            config_was_modified = True
         
         else:
             print("✨ Starting fresh training...", flush=True)
             self.model = HomogeneousYieldModel(self.config.to_dict())
             self.model(tf.constant(np.zeros((1, 3), dtype=np.float32)))
 
-        # --- 4. SETUP UTILS ---
+        # --- 4. SAVE CONFIG FILE ---
+        # Only needed for the main run or first fold
+        if fold_idx is None or fold_idx == 1:
+            target_cfg = os.path.join(base_dir, "config.yaml")
+            
+            # Case A: Resume (Do nothing, file exists)
+            if resume_path:
+                pass 
+                
+            # Case B: Transfer (Priority: Correctness)
+            # The config object now differs from the file on disk. We MUST dump the object
+            # to ensure the saved file reflects the ACTUAL architecture being trained.
+            elif config_was_modified:
+                print(f"📝 Saving UPDATED config (Transfer Architecture) to: {target_cfg}")
+                with open(target_cfg, 'w') as f:
+                    yaml.dump(self.config.to_dict(), f, sort_keys=False)
+            
+            # Case C: Standard Run (Priority: Formatting)
+            # Copy the original file to preserve comments and structure.
+            elif config_path and os.path.exists(config_path):
+                shutil.copy2(config_path, target_cfg)
+            
+            # Case D: Fallback (Dump object if no path provided)
+            else:
+                with open(target_cfg, 'w') as f:
+                    yaml.dump(self.config.to_dict(), f, sort_keys=False)
+
+        # --- 5. LOGGING ---
         self.use_symmetry = config.data.symmetry
         w = config.training.weights
         print(f"Active Losses -> Stress: {w.stress>0}, R-value: {w.r_value>0}, "
@@ -93,7 +115,7 @@ class Trainer:
         state_dict = {
             'epoch': epoch,
             'optimizer_weights': opt_weights, 
-            'config': self.config.to_dict(),
+            'config': self.config.to_dict(), # Saves the full config state
             'rng_numpy': np.random.get_state(),
             'history': self.history
         }
@@ -105,21 +127,15 @@ class Trainer:
             print(f"Saved checkpoint to {weights_path}", flush=True)
         
     def _load_checkpoint(self, path, mode):
+        # 1. Resolve Paths
         if mode == 'resume':
             if os.path.isdir(path):
-                # 1. Look in checkpoints/ subfolder first (Preferred for Resume)
                 ckpt_dir = os.path.join(path, "checkpoints")
                 states = glob.glob(os.path.join(ckpt_dir, "ckpt_epoch_*.state.pkl"))
-                
-                # 2. Look in root if subfolder empty (Legacy or Best Model only)
                 if not states:
                     root_states = glob.glob(os.path.join(path, "*.state.pkl"))
-                    # Filter to avoid accidentally picking up best_model if we want latest epoch
-                    # But if only best_model exists, we use it.
-                    if not root_states:
-                        raise FileNotFoundError(f"No checkpoint states found in {path} or {ckpt_dir}")
+                    if not root_states: raise FileNotFoundError(f"No checkpoint states found in {path}")
                     states = root_states
-
                 latest_state = max(states, key=os.path.getctime)
                 state_path = latest_state
                 weights_path = latest_state.replace(".state.pkl", ".weights.h5")
@@ -134,30 +150,47 @@ class Trainer:
                 state_path = path
                 weights_path = path.replace(".state.pkl", ".weights.h5")
             else:
-                weights_path = path
+                weights_path = path + ".weights.h5"
                 state_path = path + ".state.pkl"
             
             if not os.path.exists(state_path):
-                print("⚠️ Warning: No state file found. Assuming architecture matches config.", flush=True)
+                print("⚠️ Warning: No state file found. Cannot transfer architecture. Assuming config matches.", flush=True)
                 self.model = HomogeneousYieldModel(self.config.to_dict())
                 self.model(tf.constant(np.zeros((1, 3), dtype=np.float32)))
                 self.model.load_weights(weights_path)
                 return
 
+        # 2. Load State
         with open(state_path, 'rb') as f:
             saved_state = pickle.load(f)
 
-        saved_config_dict = saved_state['config']
-        self.config.model.hidden_layers = saved_config_dict['model']['hidden_layers']
-        self.config.model.activation = saved_config_dict['model']['activation']
+        # 3. Apply Architecture (Crucial for Transfer)
+        saved_model_conf = saved_state['config']['model']
         
-        print(f"🏗️ Rebuilding model: {self.config.model.hidden_layers}", flush=True)
+        print(f"🏗️  Loading Architecture from: {os.path.basename(state_path)}")
+        
+        # Overwrite current config with saved architecture
+        self.config.model.hidden_layers = saved_model_conf['hidden_layers']
+        self.config.model.activation = saved_model_conf['activation']
+        
+        print(f"   -> Layers: {self.config.model.hidden_layers}")
+        print(f"   -> Activation: {self.config.model.activation}")
+        
+        if 'ref_stress' in saved_model_conf:
+             self.config.model.ref_stress = saved_model_conf['ref_stress']
+             print(f"   -> Ref Stress: {self.config.model.ref_stress}")
+        
+        if 'input_dim' in saved_model_conf: self.config.model.input_dim = saved_model_conf['input_dim']
+        if 'output_dim' in saved_model_conf: self.config.model.output_dim = saved_model_conf['output_dim']
+
+        # 4. Build Model & Load Weights
         self.model = HomogeneousYieldModel(self.config.to_dict())
         self.model(tf.constant(np.zeros((1, 3), dtype=np.float32))) 
 
         print(f"📥 Loading weights from {os.path.basename(weights_path)}...", flush=True)
         self.model.load_weights(weights_path)
 
+        # 5. Restore Optimizer (Resume Only - NOT Transfer)
         if mode == 'resume':
             self.start_epoch = saved_state['epoch']
             print(f"⏱️ Resuming from Epoch {self.start_epoch}", flush=True)
@@ -180,7 +213,7 @@ class Trainer:
                 np.random.set_state(saved_state['rng_numpy'])
 
         elif mode == 'transfer':
-            print("✅ Transfer complete. Fresh optimizer.", flush=True)
+            print("✅ Transfer complete. Fresh optimizer initialized.", flush=True)
     
     def _sample_dynamic_surface(self, n_samples, force_equator=False):
         """

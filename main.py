@@ -73,7 +73,8 @@ def main():
         
         if k_folds is None or k_folds < 2:
             print("\n=== STARTING STANDARD TRAINING ===")
-            trainer = Trainer(config, resume_path=resume_path, transfer_path=transfer_path)
+            # UPDATED: Pass config_path=args.config so Trainer can copy the file
+            trainer = Trainer(config, config_path=args.config, resume_path=resume_path, transfer_path=transfer_path)
             trainer.run()
         
         else:
@@ -105,7 +106,8 @@ def main():
                                           .shuffle(len(train_idx)).batch(bs)
                 ds_val = tf.data.Dataset.from_tensor_slices((X[val_idx], y_se[val_idx], y_r[val_idx])).batch(bs)
                 
-                trainer = Trainer(config, fold_idx=k+1)
+                # UPDATED: Pass config_path here too
+                trainer = Trainer(config, config_path=args.config, fold_idx=k+1)
                 final_metric = trainer.run(train_dataset=(ds_train, None, steps), val_dataset=ds_val)
                 
                 fold_results.append({'fold': k+1, 'val_loss': final_metric, 'dir': trainer.output_dir})
@@ -163,8 +165,6 @@ def main():
             
         # B. Instantiate and Load Model
         print(f"   -> Initializing model from config...")
-        
-        # FIX: Call .to_dict() because model.py expects a dictionary, not a Config object
         model = HomogeneousYieldModel(config.to_dict()) 
         
         print("   -> Building model graph...")
@@ -175,7 +175,6 @@ def main():
         model.load_weights(weights_path)
         
         # C. Run Checker
-        # Note: We pass the 'config' OBJECT here because SanityChecker uses dot notation
         checker = SanityChecker(model, config, output_dir) 
         checker.run_all()
 
