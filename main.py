@@ -1,13 +1,16 @@
 import os
-# Silence TensorFlow Logs (1=Info, 2=Warning, 3=Error)
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
+os.environ['TF_CPP_MAX_VLOG_LEVEL'] = '0'
+
+import tensorflow as tf
+tf.get_logger().setLevel('ERROR')
+tf.autograph.set_verbosity(0)
 
 import argparse
 import sys
 import shutil
 import pandas as pd
 import numpy as np
-import tensorflow as tf
 
 from src.checks import SanityChecker
 from src.trainer import Trainer

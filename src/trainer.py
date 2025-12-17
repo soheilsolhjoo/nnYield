@@ -200,6 +200,10 @@ class Trainer:
     def train(self):
         cfg = self.config.training
         epochs = cfg.epochs
+
+        # Capture the "True" targets from config once, before they get modified
+        target_r_weight = float(self.config.training.weights.r_value)
+        target_dyn_conv_weight = float(self.config.training.weights.dynamic_convexity)
         
         print(f"\n[Trainer] Start training for {epochs} epochs.")
         
@@ -235,15 +239,21 @@ class Trainer:
             )
 
             # --- B. CURRICULUM LEARNING (WARMUPS) ---
-            # 1. Convexity Warmup (Shape)
+            ## 1. Convexity Warmup
+            # 1. Convexity Warmup
             if cfg.convexity_warmup > 0:
+                # Linear ramp: 0 -> Target
                 prog_c = min(epoch / float(cfg.convexity_warmup), 1.0)
-                self.w.dynamic_convexity = self.config.training.weights.dynamic_convexity * prog_c
+                # Apply to dynamic_convexity weight
+                self.w.dynamic_convexity = target_dyn_conv_weight * prog_c
             
-            # 2. R-value Warmup (Direction)
+            # 2. R-value Warmup (The "Path" Warmup)
             if cfg.r_warmup > 0:
                 prog_r = min(epoch / float(cfg.r_warmup), 1.0)
-                self.w.r_value = self.config.training.weights.r_value * prog_r
+                self.w.r_value = target_r_weight * prog_r
+            # else:
+            #     self.w.r_value = target_r_weight
+
             
             epoch_metrics = []
             
@@ -256,14 +266,16 @@ class Trainer:
                 if ds_phys is not None:
                     (inputs_s, target_s), (inputs_p, target_p_stress, target_r, geo_p) = batch_data
                     
-                    # Anisotropy Interval Logic
+                    # Move Interval Logic to only apply if specific batches should be skipped
+                    # But ensure data is passed if weights are active
                     ani_interval = self.config.anisotropy_ratio.interval
-                    if (ani_interval > 1) and (step % ani_interval != 0):
+                    is_physics_step = (step % ani_interval == 0)
+                    
+                    if not is_physics_step:
                          inputs_p = tf.zeros((0, 3), dtype=tf.float32)
                          target_p_stress = tf.zeros((0, 1), dtype=tf.float32)
                          target_r = tf.zeros((0, 1), dtype=tf.float32)
                          geo_p = tf.zeros((0, 3), dtype=tf.float32)
-
                 else:
                     inputs_s, target_s = batch_data
                     inputs_p = tf.zeros((0, 3), dtype=tf.float32)
@@ -306,15 +318,13 @@ class Trainer:
                 'sym_loss': avg_metrics.get('l_sym', 0)
             }
 
-            # Map internal metric keys to the naming convention expected by your plotting/analysis scripts
-            # This ensures keys like 'l_se_s' or 'l_r' are present in the CSV
+            # Map for diagnostic CSV and plotter compatibility
             mapping = {
-                'total_loss': 'train_total_loss',
-                'l_se_total': 'train_l_se_s',      # Maps combined stress to the standard stress key
+                'l_se_total': 'train_l_se_s',
                 'l_se_shape': 'train_l_se_shape',
                 'l_se_path': 'train_l_se_path',
                 'l_r': 'train_l_r',
-                'l_conv': 'train_l_conv',
+                'l_conv_static': 'train_l_conv',
                 'l_sym': 'train_l_sym',
                 'min_eig': 'train_min_eig'
             }
@@ -323,12 +333,13 @@ class Trainer:
                 if internal_key in avg_metrics:
                     log_entry[csv_key] = avg_metrics[internal_key]
 
-            # Print to console
+            # Print to console using requested 'eqS' label
             if epoch % cfg.print_interval == 0:
-                msg = f"Epoch {epoch:04d} | Total: {avg_metrics.get('total_loss', 0):.2e}"
-                if 'l_se_total' in avg_metrics: msg += f" | eqS: {avg_metrics['l_se_total']:.2e}"
-                if 'l_r' in avg_metrics: msg += f" | R-Loss: {avg_metrics['l_r']:.2e}"
-                if 'min_eig' in avg_metrics: msg += f" | MinEig: {avg_metrics['min_eig']:.2e}"
+                msg = f"Epoch {epoch:04d} | Total: {log_entry['total_loss']:.2e}"
+                msg += f" | eqS: {log_entry['se_total_loss']:.2e}"
+                msg += f" | R-Loss: {log_entry['r_loss']:.2e}"
+                if 'train_min_eig' in log_entry: 
+                    msg += f" | MinEig: {log_entry['train_min_eig']:.2e}"
                 print(msg)
 
             # --- E. CHECKPOINTING ---
