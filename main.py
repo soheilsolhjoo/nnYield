@@ -98,7 +98,7 @@ def main():
             print("\n=== STARTING STANDARD TRAINING ===")
             # Note: We pass config_path to allow the Trainer to copy it to the output dir for reproducibility
             trainer = Trainer(config, config_path=args.config, resume_path=resume_path, transfer_path=transfer_path)
-            trainer.run()
+            trainer.train()
         
         # --- SUB-MODE 3B: K-FOLD CROSS VALIDATION ---
         else:
@@ -209,7 +209,7 @@ def main():
         # B. Instantiate and Load Model
         # We must build the model graph with dummy input before loading weights
         print(f"   -> Initializing model from config...")
-        model = HomogeneousYieldModel(config.to_dict()) 
+        model = HomogeneousYieldModel(config)
         
         print("   -> Building model graph...")
         dummy_input = tf.zeros((1, 3)) 

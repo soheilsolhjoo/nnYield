@@ -19,7 +19,8 @@ class YieldDataLoader:
        - TARGETS: Yield Stress (Scalar).
        
     2. Physics Stream (Uniaxial/Experimental):
-       - WHAT: Specific stress vectors corresponding to uniaxial tension tests at various angles.
+       - WHAT: Specific stress vectors corresponding to uniaxial tension tests at strictly 
+               equidistant angles (e.g., 0, 10, 20... 90 degrees).
        - WHY: Teaches the model the precise slope (gradients) needed for accurate R-value prediction.
        - TARGETS: Yield Stress (Scalar) AND R-values (Gradients).
        
@@ -29,7 +30,7 @@ class YieldDataLoader:
     def __init__(self, config):
         """
         Args:
-            config: Configuration object containing 'data', 'physics', and 'training' settings.
+            config: The strict Config object from src/config.py.
         """
         self.config = config
 
@@ -49,16 +50,17 @@ class YieldDataLoader:
             steps_per_epoch (int): Calculated number of batches to run per epoch.
         """
         # --- 1. CONFIGURATION CHECK ---
-        # Determine if we have the ingredients for Dual Stream training.
-        n_uni = self.config['data']['samples'].get('uniaxial', 0)
+        # Accessors updated to match src/config.py Dataclass structure
         
-        # Check if R-value training is requested (weight > 0)
-        w_r = self.config['training']['weights'].get('r_value', 0.0)
+        # 'samples' is a dict inside DataConfig
+        n_uni = self.config.data.samples.get('uniaxial', 0)
         
-        # Check Anisotropy specific settings (Fraction of batch dedicated to physics)
-        ani_config = self.config.get('anisotropy_ratio', {})
-        batch_r_frac = ani_config.get('batch_r_fraction', 0.0)
-        is_enabled = ani_config.get('enabled', False)
+        # 'weights' is a WeightsConfig object inside TrainingConfig
+        w_r = self.config.training.weights.r_value
+        
+        # 'anisotropy_ratio' is an AnisotropyConfig object
+        batch_r_frac = self.config.anisotropy_ratio.batch_r_fraction
+        is_enabled = self.config.anisotropy_ratio.enabled
         
         # Criteria: We need samples, a non-zero loss weight, a non-zero batch fraction,
         # and the feature explicitly enabled in config.
@@ -79,7 +81,7 @@ class YieldDataLoader:
         ds_shape = ds_shape.shuffle(len(data_shape[0])).repeat()
 
         # --- 4. BATCHING STRATEGY ---
-        total_batch = self.config['training']['batch_size']
+        total_batch = self.config.training.batch_size
 
         if use_dual_stream:
             # === MODE A: DUAL STREAM (Mixed Batches) ===
@@ -118,15 +120,7 @@ class YieldDataLoader:
     def get_numpy_data(self):
         """
         Helper method to retrieve all generated data as flat Numpy arrays.
-        
-        Useful for:
-        1. K-Fold Cross Validation (manual splitting).
-        2. Debugging/Visualization of the generated distribution.
-        
-        Returns:
-            X (np.array): Combined inputs (Shape + Physics).
-            y_se (np.array): Combined Yield Stress targets.
-            y_r (np.array): R-value targets (Zeros for Shape data).
+        Useful for K-Fold Cross Validation or Debugging.
         """
         # Force generation of both streams to utilize all available data
         (X_s, y_s), (X_p, y_p, r_p, _) = self._generate_raw_data(needs_physics=True)
@@ -135,9 +129,7 @@ class YieldDataLoader:
         X = np.concatenate([X_s, X_p], axis=0)
         y_se = np.concatenate([y_s, y_p], axis=0)
         
-        # Handle R-values
-        # Shape data has no R-value target, so we pad with zeros.
-        # These zeros are irrelevant as the loss function calculates R-loss only on physics batch.
+        # Handle R-values (Pad shape data with zeros)
         r_s = np.zeros((len(X_s), 1), dtype=np.float32)
         y_r = np.concatenate([r_s, r_p], axis=0)
         
@@ -148,44 +140,33 @@ class YieldDataLoader:
         Internal engine to generate synthetic data points from Hill48 physics.
         
         Features:
-        - **Sobol Sampling**: Uses Quasi-Monte Carlo sequences instead of random sampling.
-          This ensures the points cover the 3D stress sphere evenly without clustering.
-        - **Anchor Injection**: Adds fixed points (Uniaxial X/Y, Equi-Biaxial) to lock down 
-          the cardinal directions of the yield surface.
-        - **Analytical Ground Truth**: Uses exact Hill48 formulas to calculate targets.
-        
-        Args:
-            needs_physics (bool): If False, skips calculating R-values to save computation.
-            
-        Returns:
-            data_shape: Tuple (Inputs, Stress_Targets)
-            data_phys: Tuple (Inputs, Stress_Targets, R_Targets, Geometry)
+        - **Sobol Sampling** (Shape): Random points covering the 3D stress sphere.
+        - **Linspace Sampling** (Physics): Equidistant points (0, 5, ... 90 deg) for R-curves.
+        - **Anchor Injection**: Fixed points (Uniaxial X/Y, Equi-Biaxial).
         """
-        # Load Sample Counts from config
-        n_gen = self.config['data']['samples'].get('loci', 1000)
-        n_uni = self.config['data']['samples'].get('uniaxial', 0) if needs_physics else 0
+        # Load Sample Counts
+        n_gen = self.config.data.samples.get('loci', 1000)
+        n_uni = self.config.data.samples.get('uniaxial', 0) if needs_physics else 0
         
         # Load Physics Parameters (Hill48 Coefficients)
-        ref_stress = self.config['model']['ref_stress']
-        phys = self.config.get('physics', {})
-        F, G, H, N = phys.get('F', 0.5), phys.get('G', 0.5), phys.get('H', 0.5), phys.get('N', 1.5)
+        ref_stress = self.config.model.ref_stress
         
-        # Derived stiffness-like coefficients for general loci generation equation
+        # PhysicsConfig object
+        phys = self.config.physics
+        F, G, H, N = phys.F, phys.G, phys.H, phys.N
+        
+        # Derived stiffness-like coefficients
         C11, C22, C12, C66 = G+H, F+H, -2*H, 2*N
-        use_symmetry = self.config['data'].get('symmetry', True)
+        use_symmetry = self.config.data.symmetry
 
         # =========================================================
-        # 1. SHAPE DATA GENERATION (Random Loci)
+        # 1. SHAPE DATA GENERATION (Random Loci - Sobol)
         # =========================================================
         if n_gen > 0:
-            # Use Sobol sequence generator for uniform coverage
             sampler = qmc.Sobol(d=2, scramble=True)
-            
-            # Sobol Optimization: Works best with powers of 2.
             m = int(np.ceil(np.log2(n_gen)))
             sample = sampler.random(2**m)[:n_gen] 
             
-            # Map Sobol [0,1] to Stress Space Coordinates
             # D1: Shear Stress (S12)
             max_shear = ref_stress / np.sqrt(C66)
             if use_symmetry:
@@ -196,16 +177,13 @@ class YieldDataLoader:
             # D2: Angle in S11-S22 plane (Theta)
             theta_g = (sample[:, 1] * 2.0 * np.pi).astype(np.float32)
             
-            # Analytically solve for Radius (Distance from origin)
-            # We want points that lie EXACTLY on the Hill48 surface.
+            # Analytically solve for Radius
             rhs = np.maximum(ref_stress**2 - C66*s12_g**2, 0)
             c, s = np.cos(theta_g), np.sin(theta_g)
             denom = C11*c**2 + C22*s**2 + C12*c*s
             radius = np.sqrt(rhs / (denom + 1e-8))
             
             inputs_gen = np.stack([radius*c, radius*s, s12_g], axis=1)
-            
-            # Target is always Ref_Stress because the inputs are generated ON the yield surface.
             se_gen = np.ones((n_gen, 1), dtype=np.float32) * ref_stress
         else:
             inputs_gen = np.zeros((0, 3), dtype=np.float32)
@@ -214,8 +192,6 @@ class YieldDataLoader:
         # =========================================================
         # 1b. INJECT ANCHOR POINTS
         # =========================================================
-        # We explicitly add key points (Uniaxial X, Uniaxial Y, Bi-axial, Pure Shear).
-        # These act as "boundary conditions" to prevent the surface from drifting or rotating.
         anchors_dir = np.array([
             [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0],
             [1.0, 1.0, 0.0], [-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [-1.0, 1.0, 0.0],
@@ -236,18 +212,15 @@ class YieldDataLoader:
         data_shape = (inputs_gen, se_gen)
         
         # =========================================================
-        # 2. PHYSICS DATA GENERATION (Uniaxial Tests)
+        # 2. PHYSICS DATA GENERATION (Uniaxial Tests - Linspace)
         # =========================================================
         if n_uni > 0:
-            # [MODIFIED] Use Linspace for strict equidistance
-            # We want angles evenly spaced from 0 to 90 (or 180) degrees.
-            limit = np.pi / 2.0 if use_symmetry else np.pi
+            # [UPDATED] Use Linspace for strict equidistance
+            # This ensures we hit 0, 90, and everything in between perfectly.
+            limit = np.pi / 2.0 if use_symmetry else 2.0 * np.pi
             
             # Generate n_uni points evenly spaced
             alpha_uni = np.linspace(0, limit, n_uni, endpoint=True, dtype=np.float32)
-            
-            # (Optional) Random Shift: If you wanted to rotate the grid every epoch,
-            # you would add a random scalar here. For fixed ground truth, keep it static.
             
             sin_a, cos_a = np.sin(alpha_uni), np.cos(alpha_uni)
             
@@ -275,9 +248,7 @@ class YieldDataLoader:
             # R-value Calculation
             r_calc = d_eps_w / (d_eps_t + 1e-8)
             
-            # Singularity Filtering (Data Cleaning)
-            # We must still filter points where thickness strain is 0 (R -> Infinity)
-            # or the values are absurdly high (numerical singularity).
+            # Filtering: Remove points where thickness strain is ~0 (Singularity)
             valid = (np.abs(r_calc) < 20.0) & (np.abs(d_eps_t) > 1e-6)
             
             if np.sum(valid) > 0:

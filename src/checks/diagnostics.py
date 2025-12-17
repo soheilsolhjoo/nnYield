@@ -30,70 +30,56 @@ class DiagnosticsChecks:
     # =========================================================================
     def check_loss_history_detailed(self):
         """
-        Generates a 2x3 grid of plots showing the detailed history of every loss component.
-        
-        Why this matters:
-        - A flat 'Total Loss' curve might hide that 'Stress Loss' is going down 
-          while 'Convexity Penalty' is skyrocketing. 
-        - We need to see them individually to ensure balanced learning.
-        
-        Outputs:
-            plots/loss_history_detailed.png
+        (2) Generates a 2x3 grid. 
+        Top Row: total | stress loss | r value loss
+        Second Row: convexity loss (static) | convexity loss (dynamic) | symmetry loss
         """
         print("Running Loss History Analysis...")
         
-        # 1. Locate the Training Log
         log_path = os.path.join(self.output_dir, "loss_history.csv")
         if not os.path.exists(log_path):
-            print(f"   [!] No training log found at {log_path}. Skipping.")
             return
 
         df = pd.read_csv(log_path)
         
-        # 2. Define Plot Layout
-        # We map specific CSV column names to readable Titles and Colors.
-        # This handles different naming conventions used in different trainer versions.
+        # Mapping to the exact keys recorded in loss_history.csv
         plots_config = [
-            ("Total Loss", ['loss', 'train_loss', 'total_loss'], 'black'),
-            ("Stress Loss (MSE)", ['loss_stress', 'train_l_se', 'l_se', 'SE'], 'blue'),
-            ("R-value Loss", ['loss_r', 'train_l_r', 'l_r', 'R'], 'green'),
-            ("Convexity Loss (Static)", ['loss_convexity', 'train_l_conv', 'l_conv'], 'purple'),
-            ("Convexity (Dynamic) / Sym", ['loss_symmetry', 'loss_dynamic', 'train_l_dyn', 'Sym'], 'magenta'),
-            ("Gradient Norm", ['gnorm', 'train_gnorm', 'grad_norm', 'G'], 'orange'),
+            # First Row
+            ("Total Loss", 'total_loss', 'black'),
+            ("Stress Loss (eqS)", 'se_total_loss', 'blue'),
+            ("R-value Loss", 'r_loss', 'green'),
+            # Second Row
+            ("Convexity Loss (Static)", 'conv_static_loss', 'purple'),
+            ("Convexity Loss (Dynamic)", 'conv_dynamic_loss', 'orange'),
+            ("Symmetry Loss", 'sym_loss', 'magenta'),
         ]
 
-        # 3. Create the Grid
         fig, axes = plt.subplots(2, 3, figsize=(18, 10))
         exp_name = self.config.get('experiment_name', 'Experiment')
         fig.suptitle(f"Training History: {exp_name}", fontsize=16)
         
-        for i, (title, candidates, color) in enumerate(plots_config):
+        for i, (title, col_name, color) in enumerate(plots_config):
             ax = axes.flat[i]
-            found_col = None
             
-            # Search for the first matching column name
-            for col in candidates:
-                if col in df.columns:
-                    found_col = col
-                    break
-            
-            if found_col:
-                ax.plot(df['epoch'], df[found_col], label=found_col, color=color, linewidth=1.5)
-                # Use Log Scale because loss values can span orders of magnitude
-                ax.set_yscale('log')
-                ax.legend()
+            if col_name in df.columns:
+                # Filter for values > 1e-12 for log-scale stability
+                plot_df = df[df[col_name] > 1e-12]
+                if not plot_df.empty:
+                    ax.plot(plot_df['epoch'], plot_df[col_name], color=color, linewidth=1.5)
+                    ax.set_yscale('log')
+                else:
+                    ax.text(0.5, 0.5, "Value is 0.0", ha='center', va='center', color='gray')
             else:
-                # Placeholder if data is missing (e.g., if Convexity wasn't enforced)
-                ax.text(0.5, 0.5, "Not Found", ha='center', va='center', color='gray')
+                ax.text(0.5, 0.5, "Column Not Found", ha='center', va='center', color='red')
 
             ax.set_title(title)
             ax.set_xlabel("Epoch")
             ax.grid(True, which="both", alpha=0.3)
 
-        plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust for suptitle space
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         plt.savefig(os.path.join(self.plot_dir, "loss_history_detailed.png"))
         plt.close()
-
+    
     # =========================================================================
     #  CHECK 7: STABILITY (Noise Analysis)
     # =========================================================================
@@ -128,7 +114,8 @@ class DiagnosticsChecks:
             f.write("------------------------------------\n")
             
             # Scan for any column that looks like a metric
-            cols = [c for c in df.columns if 'loss' in c or 'l_' in c or c in ['gnorm', 'G', 'SE', 'R']]
+            # cols = [c for c in df.columns if 'loss' in c or 'l_' in c or c in ['gnorm', 'G', 'SE', 'R']]
+            cols = [c for c in df.columns if 'train_' in c or c in ['w_conv', 'w_r']]
             
             for col in cols:
                 mean = tail[col].mean()

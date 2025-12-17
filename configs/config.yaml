@@ -1,103 +1,78 @@
-experiment_name: "vonMises_benchmark_v1"
+experiment_name: "von_mises_benchmark"
 
 # ==============================================================================
-#  1. DATA GENERATION (src/data_loader.py)
+#  DATA
 # ==============================================================================
 data:
-  # These fields are needed by src/config.py validation
-  type: "synthetic"        # We use internal synthetic generation (Hill48)
-  input_range: [-2.0, 2.0] # Defines the bounds of the normalized stress space
-  
-  # Symmetry: If true, generates points only in the first quadrant (0-90 degrees).
-  # If false, generates for the full domain (0-360 degrees).
+  type: "synthetic"
+  input_range: [-2.0, 2.0]
   symmetry: true
-  
   samples:
-    # Loci: Random points scattered on the yield surface (for general shape learning)
-    loci: 200
-    # Uniaxial: Points along specific loading paths (for R-value/Slope learning)
-    uniaxial: 20
+    loci: 200      # Training Batch: Random Shape Points
+    uniaxial: 20   # Training Batch: Equidistant Physics Points
 
 # ==============================================================================
-#  2. PHYSICS & ANISOTROPY (src/losses.py & src/data_loader.py)
+#  PERIODIC CHECKS (Used As Intended)
+# ==============================================================================
+dynamic_convexity:
+  enabled: true
+  samples: 1000    # Generate 1000 FRESH points to test convexity
+  interval: 100    # Run this specific test every 100 epochs
+
+symmetry:
+  enabled: true
+  samples: 100     # Generate 100 FRESH equator points to test symmetry
+  interval: 100    # Run this specific test every 100 epochs
+
+anisotropy_ratio:
+  enabled: true
+  batch_r_fraction: 0.25
+  interval: 1      # Mix physics data into training every N steps
+
+# ==============================================================================
+#  PHYSICS & MODEL
 # ==============================================================================
 physics:
-  # The "Ground Truth" Hill48 parameters the model tries to learn.
-  # (Corresponds to a synthetic material)
   F: 0.5
   G: 0.5
   H: 0.5
   N: 1.5
-    # Alternative anisotropic set
-  # F: 3.5
-  # G: 3.8
-  # H: 1.55
-  # N: 3.25
 
-
-anisotropy_ratio:
-  # Dual Stream Strategy:
-  # If enabled, the trainer mixes "General Shape" data with "Physics/R-value" data.
-  enabled: true
-  
-  # How much of each batch is dedicated to Physics points?
-  # 0.25 means 25% of the batch is uniaxial data (for R-values), 75% is random (for shape).
-  batch_r_fraction: 0.25
-
-# ==============================================================================
-#  3. MODEL ARCHITECTURE (src/model.py)
-# ==============================================================================
 model:
-  hidden_layers: [32, 16, 8]  # Deeper networks often capture curvature better
-  activation: "softplus"       # Must be smooth (C2 continuous) for Hessians. Do NOT use ReLU.
-  ref_stress: 1.0              # Scaling factor (usually normalized yield stress)
+  hidden_layers: [32, 16, 8]
+  activation: "softplus"
+  ref_stress: 1.0
+  use_icnn_constraints: false
 
 # ==============================================================================
-#  4. LOSS WEIGHTS (src/losses.py)
+#  WEIGHTS
 # ==============================================================================
 weights:
-  # Accuracy: Matches the yield stress magnitude.
   stress: 1.0
-  
-  # Physics: Matches the plastic flow direction (R-values).
-  # Set to 0.0 to disable physics-informed training.
   r_value: 1.0
-  
-  # Thermodynamics: Enforces convexity (Positive Definite Hessian).
-  convexity: 0.1               # Static weight (constant throughout)
-  dynamic_convexity: 10.0       # Target weight (ramps up during warmup)
-  
-  # Symmetry: Enforces Model(S12) == Model(-S12)
   symmetry: 0.1
+  convexity: 0.1
+  dynamic_convexity: 10.0
 
 # ==============================================================================
-#  5. TRAINING LOOP (src/trainer.py)
+#  TRAINING
 # ==============================================================================
 training:
-  epochs: 5000
+  k_folds: 1
+  epochs: 1000
   batch_size: 32
   learning_rate: 0.001
   save_dir: "outputs"
   
-  # Logging & Checkpointing
-  print_interval: 50           # Print status to terminal every N epochs
-  save_interval: 100           # Save checkpoint every N epochs
-  overwrite: true              # If true, deletes existing experiment folder
+  checkpoint_interval: 100   # Restored name
+  print_interval: 50
+  overwrite: true
   
-  # Curriculum Learning
-  # Linearly ramp up the 'dynamic_convexity' weight from 0 to target
-  # over the first N epochs. Helps the model learn the shape first, then refine curvature.
   convexity_warmup: 500
+  r_warmup: 200
 
-  # Early Stopping Criteria
-  # Training stops if ALL enabled metrics are met.
-  # Remove or set to null to disable a specific check.
-  stop_metrics:
-    total_loss: 0.005         # Stop if Total Loss < X
-    r_error: 0.02              # Stop if Mean R-value Error < X (e.g. 2%)
-    
-    # Convexity Check (Minimum Eigenvalue of Hessian)
-    # A perfectly convex surface has Min Eig >= 0.
-    # We allow a tiny tolerance (e.g., -1e-4) for numerical noise.
-    # Stop if Min Eig >= -0.0001
-    min_eig: -0.0002
+  # STOPPING THRESHOLDS (Original switches restored)
+  loss_threshold: 0.005        # Stop if Total Loss < X
+  r_threshold: 0.02            # Stop if R-error < X
+  convexity_threshold: -0.0001 # Stop if Min Eig >= X
+  # gnorm_threshold: null        # Disabled

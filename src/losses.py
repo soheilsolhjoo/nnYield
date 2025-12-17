@@ -1,216 +1,114 @@
 import tensorflow as tf
-import numpy as np
 
 class PhysicsLoss:
-    """
-    Physics-Informed Loss Module.
-    
-    This class encapsulates all the mathematical logic for training the Yield Surface Model.
-    
-    Architectural Role:
-    - Receives: Model predictions and Ground Truth targets (from DataLoader).
-    - Computes: Error metrics (Stress, R-value, Convexity).
-    - Returns: A dictionary of losses to be logged/optimized by the Trainer.
-    
-    Physical Constraints Implemented:
-    1. Yield Stress Accuracy (Global Shape + Experimental Points).
-    2. Anisotropy (R-values via Gradient Direction).
-    3. Convexity (Hessian Matrix Positive Definiteness).
-    4. Symmetry (Shear Symmetry).
-    """
-    
     def __init__(self, config):
-        """
-        Initializes the physics engine with material parameters.
-        """
         self.config = config
-        
-        # Load Hill48 Anisotropy Parameters (The "Ground Truth" Physics)
-        # These are used to calculate benchmark targets if needed, 
-        # though targets are primarily passed in via the training step.
-        phys = config.physics
-        self.F = tf.constant(phys.F, dtype=tf.float32)
-        self.G = tf.constant(phys.G, dtype=tf.float32)
-        self.H = tf.constant(phys.H, dtype=tf.float32)
-        self.N = tf.constant(phys.N, dtype=tf.float32)
-        
-        # Reference Stress (Scaling Factor)
-        self.ref_stress = tf.constant(config.model.ref_stress, dtype=tf.float32)
 
-    # =========================================================================
-    #  CORE MATH: AUTO-DIFFERENTIATION
-    # =========================================================================
-    @tf.function
-    def compute_gradients_and_hessians(self, model, inputs):
+    def calculate_losses(self, model, inputs, targets, weights, run_convexity=False, run_symmetry=False):
         """
-        Computes Model Predictions, Gradients (1st Deriv), and Hessians (2nd Deriv)
-        in a single optimized graph execution.
-        
-        Args:
-            model: The Keras model being trained.
-            inputs: Batch of stress unit vectors (N, 3).
-            
-        Returns:
-            val: Predicted Yield Potential.
-            grads: Gradient vector (Normal to the surface).
-            hess: Hessian matrix (Curvature of the surface).
+        Calculates loss components.
+        Optimized: Runs forward pass on physics data only once for both Stress and R-value calculations.
         """
-        with tf.GradientTape(persistent=True) as tape2:
-            tape2.watch(inputs)
-            with tf.GradientTape() as tape1:
-                tape1.watch(inputs)
-                # Forward Pass
-                val = model(inputs)
+        # 1. Unpack Data
+        (inputs_s, inputs_p) = inputs
+        (target_s, target_p_stress, target_r, geo_p) = targets
+        
+        has_shape_data = tf.shape(inputs_s)[0] > 0
+        has_phys_data = tf.shape(inputs_p)[0] > 0
+
+        # 2. Initialize Loss Components
+        l_se_shape = tf.constant(0.0, dtype=tf.float32)
+        l_se_path = tf.constant(0.0, dtype=tf.float32)
+        l_r = tf.constant(0.0, dtype=tf.float32)
+        l_conv = tf.constant(0.0, dtype=tf.float32)
+        l_sym = tf.constant(0.0, dtype=tf.float32)
+        min_eig_val = tf.constant(0.0, dtype=tf.float32)
+
+        # ---------------------------------------------------------------------
+        # A. Shape Stress Loss (Random Data)
+        # ---------------------------------------------------------------------
+        if (weights.stress > 0) and has_shape_data:
+            pred_s = model(inputs_s)
+            l_se_shape = tf.reduce_mean(tf.square(pred_s - target_s))
+
+        # ---------------------------------------------------------------------
+        # B. Physics Path Loss (Stress + R-value)
+        # ---------------------------------------------------------------------
+        if (weights.r_value > 0) and has_phys_data:
+            with tf.GradientTape() as tape:
+                tape.watch(inputs_p)
+                pred_pot = model(inputs_p)
             
-            # First Derivative (Gradient)
-            # Necessary for R-value calculation (Plastic Flow Rule)
-            grads = tape1.gradient(val, inputs)
+            # 1. Path Stress Loss (reuse the forward pass result)
+            if weights.stress > 0:
+                l_se_path = tf.reduce_mean(tf.square(pred_pot - target_p_stress))
+
+            # 2. R-Value Loss (use gradients)
+            grads = tape.gradient(pred_pot, inputs_p)
             
-        # Second Derivative (Hessian)
-        # Necessary for Convexity Check (Sylvester's Criterion)
-        hess = tape2.batch_jacobian(grads, inputs)
-        
-        del tape2 # Clean up resources
-        return val, grads, hess
-
-    # =========================================================================
-    #  BENCHMARK UTILITIES
-    # =========================================================================
-    def get_benchmark_stress(self, inputs):
-        """
-        Calculates the Analytical Hill48 Equivalent Stress for a batch of inputs.
-        Used by the Data Loader (or Trainer) to generate synthetic targets.
-        """
-        s11, s22, s12 = inputs[:, 0], inputs[:, 1], inputs[:, 2]
-        
-        # Hill48 Criterion
-        term = (self.F * s22**2 + 
-                self.G * s11**2 + 
-                self.H * (s11 - s22)**2 + 
-                2.0 * self.N * s12**2)
-        
-        # Sigma = Ref / sqrt(Pot)
-        sigma_vm = self.ref_stress / tf.sqrt(tf.maximum(term, 1e-8))
-        return sigma_vm
-
-    # =========================================================================
-    #  LOSS CALCULATION (The Main Logic)
-    # =========================================================================
-    def calculate_losses(self, model, inputs, targets, weights):
-        """
-        Calculates and aggregates all loss components.
-        
-        Args:
-            model: The Neural Network.
-            inputs: Tuple (inputs_random, inputs_physics)
-                    - random: Large batch covering the whole sphere (Shape learning).
-                    - physics: Specific experimental angles (Accuracy & R-values).
-            targets: Tuple (target_random, target_phys_stress, target_r, geo_p)
-            weights: Dynamic weights object from Config.
+            df_ds11 = grads[:, 0:1]
+            df_ds22 = grads[:, 1:2]
+            df_ds12 = grads[:, 2:3]
             
-        Returns:
-            dict: Individual losses + 'total_loss'.
-        """
-        # Unpack the Hybrid Batch
-        inputs_s, inputs_p = inputs
-        target_s, target_p_stress, target_r, geo_p = targets
-        
-        losses = {}
-        total_loss = 0.0
-
-        # --- 1. STRESS LOSS (Accuracy) ---
-        
-        # A. Random Points (General Shape)
-        # Ensures the model learns the overall Hill48 ellipsoid shape.
-        pred_s = model(inputs_s)
-        l_se_rand = tf.reduce_mean(tf.square(pred_s - target_s))
-        losses['l_se_rand'] = l_se_rand
-        
-        # B. Physics Points (Experimental Accuracy)
-        # Ensures the model is perfectly accurate at the specific angles where we have data.
-        l_se_uni = 0.0
-        if inputs_p.shape[0] > 0:
-            pred_p_stress = model(inputs_p)
-            l_se_uni = tf.reduce_mean(tf.square(pred_p_stress - target_p_stress))
+            sin2 = geo_p[:, 0:1]
+            cos2 = geo_p[:, 1:2]
+            sincos = geo_p[:, 2:3]
             
-        losses['l_se_uni'] = l_se_uni
-        
-        # Combined Stress Loss (Equal Weighting)
-        l_se_total = 0.5 * l_se_rand + 0.5 * l_se_uni
-        total_loss += weights.stress * l_se_total
-        losses['l_se'] = l_se_total
-
-        # --- 2. PHYSICS LOSSES (R-values & Convexity) ---
-        # Initialize defaults for logging (avoids crashes if batch is empty)
-        losses['l_r'] = 0.0
-        losses['l_conv'] = 0.0
-        losses['l_sym'] = 0.0
-        losses['min_eig'] = 0.0 # Diagnostic metric
-        
-        if inputs_p.shape[0] > 0:
+            d_eps_t = -(df_ds11 + df_ds22)
+            d_eps_w = df_ds11 * sin2 + df_ds22 * cos2 - 2 * df_ds12 * sincos
             
-            # Compute Derivatives (Expensive, so only done on physics batch)
-            val_p, grads_p, hess_p = self.compute_gradients_and_hessians(model, inputs_p)
+            r_pred = d_eps_w / (d_eps_t + 1e-8)
+            l_r = tf.reduce_mean(tf.abs(r_pred - target_r))
 
-            # A. R-value Loss (Anisotropy)
-            if weights.r_value > 0:
-                # 1. Normalize Gradients -> Unit Direction Vectors
-                # Physics: R-value is determined by the DIRECTION of the normal vector.
-                # We normalize magnitude to 1.0 so the calculation is purely directional.
-                local_norms = tf.norm(grads_p, axis=1, keepdims=True) + 1e-8
-                grads_norm = grads_p / local_norms
-                
-                ds_11, ds_22, ds_12 = grads_norm[:, 0], grads_norm[:, 1], grads_norm[:, 2]
-                
-                # 2. Calculate Plastic Strain Increments
-                sin2, cos2, sc = geo_p[:, 0], geo_p[:, 1], geo_p[:, 2]
-                d_eps_thick = -(ds_11 + ds_22)
-                d_eps_width = ds_11*sin2 + ds_22*cos2 - 2.0*ds_12*sc
-                
-                # 3. Geometric Error Metric
-                # Measures distance between Predicted Strain Vector and Target Strain Vector.
-                # Robust against R -> Infinity.
-                num = d_eps_width - (target_r * d_eps_thick)
-                den = tf.sqrt(1.0 + tf.square(target_r))
-                geo_error = tf.abs(num / den)
-                
-                l_r = tf.reduce_mean(geo_error)
-                
-                total_loss += weights.r_value * l_r
-                losses['l_r'] = l_r
+        # Combine Stress Losses
+        l_se_total = l_se_shape + l_se_path
 
-            # B. Convexity Loss (Thermodynamics)
-            if weights.convexity > 0 or weights.dynamic_convexity > 0:
-                # Calculate Principal Minors of the Hessian Matrix
-                # Condition: All minors must be > 0 for convexity.
-                m1 = hess_p[:, 0, 0]
-                m2 = (hess_p[:, 0, 0] * hess_p[:, 1, 1]) - (hess_p[:, 0, 1] * hess_p[:, 1, 0])
-                m3 = tf.linalg.det(hess_p)
-                
-                # Find the most negative (violating) minor
-                min_minor = tf.minimum(tf.minimum(m1, m2), m3)
-                
-                # Penalty: ReLU ensures we only punish if min_minor < 0
-                violation = tf.nn.relu(-min_minor)
-                l_conv = tf.reduce_mean(tf.square(violation))
-                
-                # Combine Static and Dynamic Weights
-                w_conv_total = weights.convexity + weights.dynamic_convexity
-                total_loss += w_conv_total * l_conv
-                
-                losses['l_conv'] = l_conv
-                losses['min_eig'] = tf.reduce_min(min_minor) # Log worst violation
+        # ---------------------------------------------------------------------
+        # C. Convexity Loss
+        # ---------------------------------------------------------------------
+        if run_convexity and (weights.convexity > 0 or weights.dynamic_convexity > 0) and has_shape_data:
+            with tf.GradientTape() as tape2:
+                tape2.watch(inputs_s)
+                with tf.GradientTape() as tape1:
+                    tape1.watch(inputs_s)
+                    y = model(inputs_s)
+                grads = tape1.gradient(y, inputs_s)
+            
+            hessian = tape2.batch_jacobian(grads, inputs_s)
+            eigs = tf.linalg.eigvalsh(hessian)
+            min_eig = eigs[:, 0]
+            min_eig_val = tf.reduce_mean(min_eig)
+            
+            l_conv = tf.reduce_mean(tf.nn.relu(-min_eig))
 
-            # C. Symmetry Loss (Constraint)
-            # Enforces Model(S11, S22, S12) == Model(S11, S22, -S12)
-            if weights.symmetry > 0:
-                inputs_flip = tf.stack([inputs_p[:,0], inputs_p[:,1], -inputs_p[:,2]], axis=1)
-                val_flip = model(inputs_flip)
-                
-                l_sym = tf.reduce_mean(tf.square(val_p - val_flip))
-                
-                total_loss += weights.symmetry * l_sym
-                losses['l_sym'] = l_sym
+        # ---------------------------------------------------------------------
+        # D. Symmetry Loss
+        # ---------------------------------------------------------------------
+        if run_symmetry and (weights.symmetry > 0) and has_shape_data:
+            inputs_sym = tf.stack([inputs_s[:, 0], inputs_s[:, 1], -inputs_s[:, 2]], axis=1)
+            pred_orig = model(inputs_s)
+            pred_sym = model(inputs_sym)
+            l_sym = tf.reduce_mean(tf.square(pred_orig - pred_sym))
 
-        losses['total_loss'] = total_loss
-        return losses
+        # ---------------------------------------------------------------------
+        # E. Total Loss
+        # ---------------------------------------------------------------------
+        w_conv_total = weights.convexity + weights.dynamic_convexity
+        
+        total_loss = (
+            (weights.stress * l_se_total) + 
+            (weights.r_value * l_r) + 
+            (w_conv_total * l_conv) + 
+            (weights.symmetry * l_sym)
+        )
+
+        return {
+            'total_loss': total_loss,
+            'l_se_total': l_se_total,
+            'l_se_shape': l_se_shape, 
+            'l_se_path': l_se_path,   
+            'l_r': l_r,
+            'l_conv': l_conv,
+            'l_sym': l_sym,
+            'min_eig': min_eig_val
+        }
