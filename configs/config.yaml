@@ -1,70 +1,103 @@
-experiment_name: "von_mises_all"
+experiment_name: "vonMises_benchmark_v1"
 
+# ==============================================================================
+#  1. DATA GENERATION (src/data_loader.py)
+# ==============================================================================
 data:
-  type: "synthetic"   # Options: synthetic, csv
-  symmetry: true      # Set to true to enforce s12>=0, false for full range
+  # These fields are needed by src/config.py validation
+  type: "synthetic"        # We use internal synthetic generation (Hill48)
+  input_range: [-2.0, 2.0] # Defines the bounds of the normalized stress space
+  
+  # Symmetry: If true, generates points only in the first quadrant (0-90 degrees).
+  # If false, generates for the full domain (0-360 degrees).
+  symmetry: true
+  
   samples:
-    loci: 200         # For shape/convexity (Mask=0)
-    uniaxial: 10     # For R-values (Mask=1)
-  input_range: [-1.0, 1.0]
+    # Loci: Random points scattered on the yield surface (for general shape learning)
+    loci: 200
+    # Uniaxial: Points along specific loading paths (for R-value/Slope learning)
+    uniaxial: 20
 
-dynamic_convexity:
-  enabled: true
-  samples: 1000        # How many random points to probe per step
-  interval: 100       # Run dynamic check every N steps (0 = every step)
-
-symmetry:
-  enabled: true
-  samples: 100        # Number of equator points
-  interval: 100       # Run every N steps (0 = every step)
-
-anisotropy_ratio:
-  # This decides if we go for dual stream of single one
-  enabled: true         # Enable R-value data loss
-  batch_r_fraction: 0.2  # Fraction of batch for R-value data
-  interval: 10           # Run every N steps (0 = every step)
-
-model:
-  hidden_layers: [8, 8, 8, 8]  # Number of neurons per hidden layer
-  activation: "softplus" # Must be smooth (no ReLU)
-  ref_stress: 1.0
-  use_icnn_constraints: false # Enforce ICNN constraints for convexity
-
-physics:  # synthetic Hill48 parameters
-  # This set corresponds to a von Mises model
+# ==============================================================================
+#  2. PHYSICS & ANISOTROPY (src/losses.py & src/data_loader.py)
+# ==============================================================================
+physics:
+  # The "Ground Truth" Hill48 parameters the model tries to learn.
+  # (Corresponds to a synthetic material)
   F: 0.5
   G: 0.5
   H: 0.5
   N: 1.5
-  # Alternative anisotropic set
+    # Alternative anisotropic set
   # F: 3.5
   # G: 3.8
   # H: 1.55
   # N: 3.25
+
+
+anisotropy_ratio:
+  # Dual Stream Strategy:
+  # If enabled, the trainer mixes "General Shape" data with "Physics/R-value" data.
+  enabled: true
   
+  # How much of each batch is dedicated to Physics points?
+  # 0.25 means 25% of the batch is uniaxial data (for R-values), 75% is random (for shape).
+  batch_r_fraction: 0.25
+
+# ==============================================================================
+#  3. MODEL ARCHITECTURE (src/model.py)
+# ==============================================================================
+model:
+  hidden_layers: [32, 16, 8]  # Deeper networks often capture curvature better
+  activation: "softplus"       # Must be smooth (C2 continuous) for Hessians. Do NOT use ReLU.
+  ref_stress: 1.0              # Scaling factor (usually normalized yield stress)
+
+# ==============================================================================
+#  4. LOSS WEIGHTS (src/losses.py)
+# ==============================================================================
+weights:
+  # Accuracy: Matches the yield stress magnitude.
+  stress: 1.0
+  
+  # Physics: Matches the plastic flow direction (R-values).
+  # Set to 0.0 to disable physics-informed training.
+  r_value: 1.0
+  
+  # Thermodynamics: Enforces convexity (Positive Definite Hessian).
+  convexity: 0.1               # Static weight (constant throughout)
+  dynamic_convexity: 10.0       # Target weight (ramps up during warmup)
+  
+  # Symmetry: Enforces Model(S12) == Model(-S12)
+  symmetry: 0.1
+
+# ==============================================================================
+#  5. TRAINING LOOP (src/trainer.py)
+# ==============================================================================
 training:
-  k_folds: 1
-  epochs: 100000
-  batch_size: 16
+  epochs: 5000
+  batch_size: 32
   learning_rate: 0.001
   save_dir: "outputs"
-  checkpoint_interval: 100
+  
+  # Logging & Checkpointing
+  print_interval: 50           # Print status to terminal every N epochs
+  save_interval: 100           # Save checkpoint every N epochs
+  overwrite: true              # If true, deletes existing experiment folder
+  
+  # Curriculum Learning
+  # Linearly ramp up the 'dynamic_convexity' weight from 0 to target
+  # over the first N epochs. Helps the model learn the shape first, then refine curvature.
+  convexity_warmup: 500
 
-  # --- STOPPING SWITCHES ---
-  # Training stops ONLY when ALL enabled thresholds are met.
-  # Set to null (or remove) to disable specific checks.
-  loss_threshold: 0.01       # Main Stop: Total Loss (Stress + others)
-  gnorm_threshold: 0.01        # Stability: Max allowed gradient norm | NOTE: There is no weight-loss directly connected to this switch.
-  r_threshold: 0.01            # Accuracy: Max allowed R-value error (approx 5%)
-  # convexity_threshold: Target for PHYSICAL MIN EIGENVALUE
-  # Set this to the "Maximum Allowed Dent Depth".
-  # Example: 2.0e-4 means "Stop only if Min Eigenvalue >= -0.0002"
-  convexity_threshold: 2.0e-4
-
-  weights:
-    stress: 1.0
-    r_value: 5.0          # Weight for R-value data
-    convexity: 1.0       # Weight for static data convexity
-    dynamic_convexity: 1.0 # Weight for dynamic self-consistent convexity
-    symmetry: 0.1        # Penalty for non-zero shear slope at equator
-    gradient_norm: 1.0   # Penalty for high gradient norms (0.0 to disable)
+  # Early Stopping Criteria
+  # Training stops if ALL enabled metrics are met.
+  # Remove or set to null to disable a specific check.
+  stop_metrics:
+    total_loss: 0.005         # Stop if Total Loss < X
+    r_error: 0.02              # Stop if Mean R-value Error < X (e.g. 2%)
+    
+    # Convexity Check (Minimum Eigenvalue of Hessian)
+    # A perfectly convex surface has Min Eig >= 0.
+    # We allow a tiny tolerance (e.g., -1e-4) for numerical noise.
+    # Stop if Min Eig >= -0.0001
+    min_eig: -0.0002
