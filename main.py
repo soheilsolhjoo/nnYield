@@ -1,13 +1,50 @@
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
-os.environ['TF_CPP_MAX_VLOG_LEVEL'] = '0'
+import sys
+import yaml
+import argparse
+from datetime import datetime
+
+def setup_silent_logging(config_path):
+    # 1. Extract Experiment Name
+    exp_name = "default_exp"
+    try:
+        with open(config_path, 'r') as f:
+            cfg = yaml.safe_load(f)
+            exp_name = cfg.get('experiment_name', 'default_exp')
+    except Exception:
+        pass
+
+    # 2. Setup Directory and Timestamped Filename
+    log_dir = os.path.join("outputs", exp_name, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"tf_errors_{timestamp}.log")
+
+    # 3. Redirect Stderr (C++ logs) to the file
+    if os.name == 'posix':
+        sys.stderr.flush()
+        fd = os.open(log_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+        os.dup2(fd, 2)
+    
+    # Set TF noise reduction levels
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+    os.environ['AUTOGRAPH_VERBOSITY'] = '0'
+
+# --- MAIN EXECUTION ---
+# Get config path from sys.argv to run before full argparse
+import sys
+cfg_path = "configs/config.yaml" # default
+for i, arg in enumerate(sys.argv):
+    if arg == "--config" and i + 1 < len(sys.argv):
+        cfg_path = sys.argv[i+1]
+
+setup_silent_logging(cfg_path)
 
 import tensorflow as tf
-tf.get_logger().setLevel('ERROR')
-tf.autograph.set_verbosity(0)
+# tf.get_logger().setLevel('ERROR')
+# tf.autograph.set_verbosity(0)
 
-import argparse
-import sys
 import shutil
 import pandas as pd
 import numpy as np

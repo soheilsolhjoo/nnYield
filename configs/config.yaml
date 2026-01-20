@@ -16,7 +16,7 @@ data:
 # ==============================================================================
 dynamic_convexity:
   enabled: true
-  samples: 1000    # Generate 1000 FRESH points to test convexity
+  samples: 100    # Generate N FRESH points to test convexity
   interval: 10    # Run this specific test every 100 epochs
 
 symmetry:
@@ -48,11 +48,11 @@ model:
 #  WEIGHTS
 # ==============================================================================
 weights:
-  stress: 1.0
+  stress: 10.0
   r_value: 1.0
   symmetry: 0.1
   convexity: 0.1
-  dynamic_convexity: 10.0
+  dynamic_convexity: 1.0
 
 # ==============================================================================
 #  TRAINING
