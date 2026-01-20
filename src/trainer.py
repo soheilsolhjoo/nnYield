@@ -306,6 +306,7 @@ class Trainer:
 
             # --- D. AGGREGATION & LOGGING ---
             avg_metrics = pd.DataFrame(epoch_metrics).mean().to_dict()
+            val_r_error = self.validate_on_path()
             
             log_entry = {
                 'epoch': epoch, 
@@ -313,6 +314,7 @@ class Trainer:
                 'total_loss': avg_metrics.get('total_loss', 0),
                 'se_total_loss': avg_metrics.get('l_se_total', 0),
                 'r_loss': avg_metrics.get('l_r', 0),
+                'val_r_error': val_r_error,
                 'conv_static_loss': avg_metrics.get('l_conv_static', 0),
                 'conv_dynamic_loss': avg_metrics.get('l_conv_dynamic', 0),
                 'sym_loss': avg_metrics.get('l_sym', 0)
@@ -356,7 +358,8 @@ class Trainer:
             pd.DataFrame(self.history).to_csv(os.path.join(self.output_dir, "loss_history.csv"), index=False)
 
             # --- G. STOPPING CRITERIA ---
-            pass_loss = True
+            # pass_loss = True
+            pass_loss = (avg_metrics['total_loss'] <= cfg.loss_threshold)
             if cfg.loss_threshold is not None:
                 pass_loss = (current_loss <= cfg.loss_threshold)
             
@@ -369,7 +372,8 @@ class Trainer:
                 else:
                      pass_conv = True
             
-            pass_r = True
+            # pass_r = True
+            pass_r    = (val_r_error <= cfg.r_threshold)
             if cfg.r_threshold is not None:
                 pass_r = (avg_metrics['l_r'] <= cfg.r_threshold)
 
