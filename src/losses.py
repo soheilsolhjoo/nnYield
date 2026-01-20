@@ -38,13 +38,6 @@ class PhysicsLoss:
             d_eps_t = -(df_ds11 + df_ds22)
             d_eps_w = df_ds11 * sin2 + df_ds22 * cos2 - 2 * df_ds12 * sincos
             
-            with tf.GradientTape() as tape:
-                tape.watch(inputs_p)
-                pred_pot = model(inputs_p)
-            if weights.stress > 0:
-                l_se_path = tf.reduce_mean(tf.square(pred_pot - target_p_stress))
-            grads = tape.gradient(pred_pot, inputs_p)
-            # ... (Flow rule math remains same) ...
             r_pred = d_eps_w / (d_eps_t + 1e-8)
             l_r = tf.reduce_mean(tf.abs(r_pred - target_r))
 

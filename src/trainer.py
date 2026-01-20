@@ -374,8 +374,8 @@ class Trainer:
             
             # pass_r = True
             pass_r    = (val_r_error <= cfg.r_threshold)
-            if cfg.r_threshold is not None:
-                pass_r = (avg_metrics['l_r'] <= cfg.r_threshold)
+            # if cfg.r_threshold is not None:
+            #     pass_r = (avg_metrics['l_r'] <= cfg.r_threshold)
 
             should_stop = (pass_loss and pass_conv and pass_r)
             any_criteria_set = (cfg.loss_threshold or cfg.convexity_threshold or cfg.r_threshold)
