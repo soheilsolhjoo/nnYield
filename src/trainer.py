@@ -369,8 +369,8 @@ class Trainer:
 
             # Print to console using requested 'eqS' label
             if epoch % cfg.print_interval == 0:
-                msg = f"Epoch {epoch:04d} | Total: {log_entry['total_loss']:.2e}"
-                msg += f" | eqS: {log_entry['train_l_se_s']:.2e}"
+                msg = f"Epoch {epoch:04d} | Total-Loss: {log_entry['total_loss']:.2e}"
+                msg += f" | eqS-Loss: {log_entry['train_l_se_s']:.2e}"
                 msg += f" | R-Loss: {log_entry['val_r_error']:.2e}"
                 if 'train_min_eig' in log_entry: 
                     msg += f" | MinEig: {log_entry['train_min_eig']:.2e}"
