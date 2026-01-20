@@ -35,6 +35,7 @@ class PhysicsLoss:
             df_ds11, df_ds22, df_ds12 = grads[:, 0:1], grads[:, 1:2], grads[:, 2:3]
             sin2, cos2, sincos = geo_p[:, 0:1], geo_p[:, 1:2], geo_p[:, 2:3]
             
+            # Flow Rule calculation
             d_eps_t = -(df_ds11 + df_ds22)
             d_eps_w = df_ds11 * sin2 + df_ds22 * cos2 - 2 * df_ds12 * sincos
             
