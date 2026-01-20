@@ -17,12 +17,12 @@ data:
 dynamic_convexity:
   enabled: true
   samples: 100    # Generate N FRESH points to test convexity
-  interval: 10    # Run this specific test every 100 epochs
+  interval: 1    # Run this specific test every 100 epochs
 
 symmetry:
   enabled: true
   samples: 100     # Generate 100 FRESH equator points to test symmetry
-  interval: 100    # Run this specific test every 100 epochs
+  interval: 1    # Run this specific test every 100 epochs
 
 anisotropy_ratio:
   enabled: true

@@ -273,6 +273,8 @@ class Trainer:
                 prog_c = min(epoch / float(cfg.convexity_warmup), 1.0)
                 # Apply to dynamic_convexity weight
                 self.w.dynamic_convexity = target_dyn_conv_weight * prog_c
+            else:
+                self.w.dynamic_convexity = target_dyn_conv_weight
             
             # 2. R-value Warmup (The "Path" Warmup)
             if cfg.r_warmup > 0:
@@ -333,18 +335,20 @@ class Trainer:
 
             # --- D. AGGREGATION & LOGGING ---
             avg_metrics = pd.DataFrame(epoch_metrics).mean().to_dict()
-            val_r_error = self.validate_on_path()
-            
+            val_r_error = self.validate_on_path() # Required for stopping/logging
+
+            # Consolidated log entry: Each metric has exactly one unique name
             log_entry = {
                 'epoch': epoch, 
                 'time': time.time() - start_time,
                 'total_loss': avg_metrics.get('total_loss', 0),
-                'se_total_loss': avg_metrics.get('l_se_total', 0),
-                'r_loss': avg_metrics.get('l_r', 0),
                 'val_r_error': val_r_error,
-                'conv_static_loss': avg_metrics.get('l_conv_static', 0),
-                'conv_dynamic_loss': avg_metrics.get('l_conv_dynamic', 0),
-                'sym_loss': avg_metrics.get('l_sym', 0)
+                'train_l_se_s': avg_metrics.get('l_se_total', 0),
+                'train_l_r': avg_metrics.get('l_r', 0),
+                'train_l_conv_static': avg_metrics.get('l_conv_static', 0),
+                'train_l_conv_dynamic': avg_metrics.get('l_conv_dynamic', 0),
+                'train_l_sym': avg_metrics.get('l_sym', 0),
+                'train_min_eig': avg_metrics.get('min_eig', 0)
             }
 
             # Map for diagnostic CSV and plotter compatibility
@@ -353,7 +357,8 @@ class Trainer:
                 'l_se_shape': 'train_l_se_shape',
                 'l_se_path': 'train_l_se_path',
                 'l_r': 'train_l_r',
-                'l_conv_static': 'train_l_conv',
+                'l_conv_static': 'train_l_conv_static',
+                'l_conv_dynamic': 'train_l_conv_dynamic',
                 'l_sym': 'train_l_sym',
                 'min_eig': 'train_min_eig'
             }
@@ -365,8 +370,8 @@ class Trainer:
             # Print to console using requested 'eqS' label
             if epoch % cfg.print_interval == 0:
                 msg = f"Epoch {epoch:04d} | Total: {log_entry['total_loss']:.2e}"
-                msg += f" | eqS: {log_entry['se_total_loss']:.2e}"
-                msg += f" | R-Loss: {log_entry['r_loss']:.2e}"
+                msg += f" | eqS: {log_entry['train_l_se_s']:.2e}"
+                msg += f" | R-Loss: {log_entry['val_r_error']:.2e}"
                 if 'train_min_eig' in log_entry: 
                     msg += f" | MinEig: {log_entry['train_min_eig']:.2e}"
                 print(msg)
@@ -401,15 +406,15 @@ class Trainer:
             
             # pass_r = True
             pass_r    = (val_r_error <= cfg.r_threshold)
-            if cfg.r_threshold is not None:
-                pass_r = (avg_metrics['l_r'] <= cfg.r_threshold)
+            # if cfg.r_threshold is not None:
+            #     pass_r = (avg_metrics['l_r'] <= cfg.r_threshold)
 
             should_stop = (pass_loss and pass_conv and pass_r)
             any_criteria_set = (cfg.loss_threshold or cfg.convexity_threshold or cfg.r_threshold)
             
             if any_criteria_set and should_stop:
                 print(f"\n[Trainer] Targets reached at epoch {epoch}!")
-                print(f"   Final Loss: {current_loss:.2e} | Val R-Err: {avg_metrics['l_r']:.4f}")
+                print(f"   Final Loss: {current_loss:.2e} | Val R-Err: {val_r_error:.4f}")
                 self.model.save_weights(os.path.join(self.output_dir, "converged_model.weights.h5"))
                 break
 

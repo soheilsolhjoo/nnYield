@@ -60,11 +60,42 @@ class PhysicsLoss:
             if weights.convexity > 0: l_conv_static = raw_penalty
             if weights.dynamic_convexity > 0: l_conv_dynamic = raw_penalty
 
-        # D. Symmetry (Reuses pred_s)
+        # # D. Symmetry (Reuses pred_s)
+        # if run_symmetry and (weights.symmetry > 0) and has_shape_data:
+        #     inputs_sym = tf.stack([inputs_s[:, 0], inputs_s[:, 1], -inputs_s[:, 2]], axis=1)
+        #     pred_sym = model(inputs_sym)
+        #     l_sym = tf.reduce_mean(tf.square(pred_s - pred_sym))
+
+        # # D. Symmetry Loss (Now supports dedicated symmetry inputs)
+        # if run_symmetry and (weights.symmetry > 0):
+        #     # If the trainer provides dedicated sym-testing points, use them
+        #     # otherwise fall back to inputs_s
+        #     test_inputs = inputs_s if has_shape_data else tf.zeros((0, 3))
+            
+        #     if tf.greater(tf.shape(test_inputs)[0], 0):
+        #         # Flip the sign of the shear component (index 2)
+        #         inputs_sym = tf.stack([test_inputs[:, 0], test_inputs[:, 1], -test_inputs[:, 2]], axis=1)
+                
+        #         # Compare original model output with flipped-shear output
+        #         orig_pred = model(test_inputs)
+        #         pred_sym = model(inputs_sym)
+        #         l_sym = tf.reduce_mean(tf.square(orig_pred - pred_sym))
+
+        # D. Symmetry Loss (Orthotropy: Enforce zero shear gradient at s12=0)
         if run_symmetry and (weights.symmetry > 0) and has_shape_data:
-            inputs_sym = tf.stack([inputs_s[:, 0], inputs_s[:, 1], -inputs_s[:, 2]], axis=1)
-            pred_sym = model(inputs_sym)
-            l_sym = tf.reduce_mean(tf.square(pred_s - pred_sym))
+            with tf.GradientTape() as tape:
+                tape.watch(inputs_s)
+                # Forward pass on the Zero-Shear training data
+                pred_sym = model(inputs_s)
+            
+            # Calculate the gradient of the Potential w.r.t the Stress Inputs
+            grads = tape.gradient(pred_sym, inputs_s) # Shape: [Batch, 3] (s11, s22, s12)
+            
+            # Extract the derivative w.r.t sigma_12 (index 2)
+            df_ds12 = grads[:, 2]
+            
+            # We want this slope to be zero (Flat tangential response in shear direction)
+            l_sym = tf.reduce_mean(tf.square(df_ds12))
 
         total_loss = (weights.stress * l_se_total) + (weights.r_value * l_r) + \
                      (weights.convexity * l_conv_static) + \
