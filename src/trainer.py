@@ -86,33 +86,99 @@ class Trainer:
                 self._restore_checkpoint(self.manager.latest_checkpoint)
 
     def _restore_checkpoint(self, path):
-        # print(f"[Trainer] Restoring checkpoint from: {path}")
+        # # # print(f"[Trainer] Restoring checkpoint from: {path}")
+        # # # self.ckpt.restore(path).expect_partial()
+        # # # hist_path = os.path.join(self.output_dir, "loss_history.csv")
+        # # # if os.path.exists(hist_path):
+        # # #     df = pd.read_csv(hist_path)
+        # # #     if not df.empty:
+        # # #         self.start_epoch = int(df.iloc[-1]['epoch']) + 1
+        # # #         self.history = df.to_dict('records')
+        # # # print(f"[Trainer] Resumed at epoch {self.start_epoch}")
+        # # # If the path is a directory, find the latest checkpoint prefix within it
+        # # if os.path.isdir(path):
+        # #     latest = tf.train.latest_checkpoint(os.path.join(path, "checkpoints"))
+        # #     if latest:
+        # #         path = latest
+        # #     else:
+        # #         print(f"[Trainer] No checkpoints found in {path}. Starting from scratch.")
+        # #         return
+
+        # # # Now path is a specific prefix (e.g., .../checkpoints/ckpt-5)
+        # # self.ckpt.restore(path).expect_partial()
+        
+        # # # Load History
+        # # # We look for the CSV in the parent directory of the checkpoints
+        # # search_dir = os.path.dirname(path) if not os.path.isdir(path) else path
+        # # if "checkpoints" in search_dir:
+        # #     search_dir = os.path.dirname(search_dir)
+            
+        # # hist_path = os.path.join(search_dir, "loss_history.csv")
+        # # if os.path.exists(hist_path):
+        # #     df = pd.read_csv(hist_path)
+        # #     if not df.empty:
+        # #         self.start_epoch = int(df.iloc[-1]['epoch']) + 1
+        # #         self.history = df.to_dict('records')
+        
+        # # print(f"[Trainer] Resumed at epoch {self.start_epoch} from {path}")
+        # # 1. Resolve Directory to Checkpoint File
+        # if os.path.isdir(path):
+        #     latest = tf.train.latest_checkpoint(os.path.join(path, "checkpoints"))
+        #     if not latest:
+        #         latest = tf.train.latest_checkpoint(path)
+        #     path = latest
+
+        # if not path:
+        #     print(f"[Trainer] No checkpoints found in {path}. Starting from scratch.")
+        #     return
+
+        # # 2. CRITICAL FIX: Build Model Variables Before Restoring
+        # # Without this, restore() finds no variables to populate and silently fails.
+        # dummy_input = tf.zeros((1, 3))
+        # self.model(dummy_input)
+
+        # # 3. Restore State
         # self.ckpt.restore(path).expect_partial()
-        # hist_path = os.path.join(self.output_dir, "loss_history.csv")
+        
+        # # 4. Load History (to set start_epoch)
+        # search_dir = os.path.dirname(os.path.dirname(path)) if "checkpoints" in path else os.path.dirname(path)
+        # hist_path = os.path.join(search_dir, "loss_history.csv")
+        
         # if os.path.exists(hist_path):
         #     df = pd.read_csv(hist_path)
         #     if not df.empty:
         #         self.start_epoch = int(df.iloc[-1]['epoch']) + 1
         #         self.history = df.to_dict('records')
-        # print(f"[Trainer] Resumed at epoch {self.start_epoch}")
-        # If the path is a directory, find the latest checkpoint prefix within it
+        
+        # print(f"[Trainer] Resumed at epoch {self.start_epoch} from {path}")
+        # 1. Resolve Path (Existing logic...)
         if os.path.isdir(path):
             latest = tf.train.latest_checkpoint(os.path.join(path, "checkpoints"))
-            if latest:
-                path = latest
-            else:
-                print(f"[Trainer] No checkpoints found in {path}. Starting from scratch.")
-                return
+            if not latest: latest = tf.train.latest_checkpoint(path)
+            path = latest
 
-        # Now path is a specific prefix (e.g., .../checkpoints/ckpt-5)
-        self.ckpt.restore(path).expect_partial()
+        if not path:
+            print("[Trainer] No checkpoint found. Starting from scratch.")
+            return
+
+        # 2. FORCE MODEL & OPTIMIZER BUILD [Critical Fix]
+        # Run a dummy forward pass (builds Model weights)
+        dummy_in = tf.zeros((1, 3))
+        _ = self.model(dummy_in)
         
-        # Load History
-        # We look for the CSV in the parent directory of the checkpoints
-        search_dir = os.path.dirname(path) if not os.path.isdir(path) else path
-        if "checkpoints" in search_dir:
-            search_dir = os.path.dirname(search_dir)
-            
+        # Run a dummy backward pass (builds Optimizer variables like 'm' and 'v')
+        # We use a zero-gradient update on a dummy variable to trigger build without messing up weights
+        with tf.GradientTape() as tape:
+            dummy_loss = tf.reduce_sum(self.model(dummy_in))
+        grads = tape.gradient(dummy_loss, self.model.trainable_variables)
+        self.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
+
+        # 3. NOW restore. The slots exist, so the optimizer state will load.
+        status = self.ckpt.restore(path)
+        status.expect_partial() # Safe now because we know variables exist
+        
+        # 4. Load History (Existing logic...)
+        search_dir = os.path.dirname(os.path.dirname(path)) if "checkpoints" in path else os.path.dirname(path)
         hist_path = os.path.join(search_dir, "loss_history.csv")
         if os.path.exists(hist_path):
             df = pd.read_csv(hist_path)
@@ -242,7 +308,16 @@ class Trainer:
         else:
             train_ds = ds_shape
             
-        start_time = time.time()
+        # start_time = time.time()
+        # --- RESUME TIME LOGIC ---
+        previous_time = 0.0
+        if self.history:
+            # Get the last recorded 'time' from the history list
+            previous_time = float(self.history[-1].get('time', 0.0))
+        
+        # We track "session time" and add it to "previous accumulated time"
+        session_start = time.time()
+        
         best_loss = float('inf')
 
         # 2. Epoch Loop
@@ -340,27 +415,27 @@ class Trainer:
             # Consolidated log entry: Each metric has exactly one unique name
             log_entry = {
                 'epoch': epoch, 
-                'time': time.time() - start_time,
+                'time': previous_time + (time.time() - session_start),
                 'total_loss': avg_metrics.get('total_loss', 0),
-                'val_r_error': val_r_error,
-                'train_l_se_s': avg_metrics.get('l_se_total', 0),
-                'train_l_r': avg_metrics.get('l_r', 0),
-                'train_l_conv_static': avg_metrics.get('l_conv_static', 0),
-                'train_l_conv_dynamic': avg_metrics.get('l_conv_dynamic', 0),
-                'train_l_sym': avg_metrics.get('l_sym', 0),
-                'train_min_eig': avg_metrics.get('min_eig', 0)
+                'eqS_loss': avg_metrics.get('l_se_total', 0),
+                'r_loss_val': val_r_error,
+                'r_loss_train': avg_metrics.get('l_r', 0),
+                'conv_static_loss': avg_metrics.get('l_conv_static', 0),
+                'conv_dynamic_loss': avg_metrics.get('l_conv_dynamic', 0),
+                'sym_loss': avg_metrics.get('l_sym', 0),
+                'min_eig_train': avg_metrics.get('min_eig', 0)
             }
 
             # Map for diagnostic CSV and plotter compatibility
             mapping = {
-                'l_se_total': 'train_l_se_s',
+                'l_se_total': 'eqS_loss',
                 'l_se_shape': 'train_l_se_shape',
                 'l_se_path': 'train_l_se_path',
-                'l_r': 'train_l_r',
-                'l_conv_static': 'train_l_conv_static',
-                'l_conv_dynamic': 'train_l_conv_dynamic',
-                'l_sym': 'train_l_sym',
-                'min_eig': 'train_min_eig'
+                'l_r': 'r_loss_train',
+                'l_conv_static': 'conv_static_loss',
+                'l_conv_dynamic': 'conv_dynamic_loss',
+                'l_sym': 'sym_loss',
+                'min_eig': 'min_eig_train'
             }
 
             for internal_key, csv_key in mapping.items():
@@ -370,8 +445,8 @@ class Trainer:
             # Print to console using requested 'eqS' label
             if epoch % cfg.print_interval == 0:
                 msg = f"Epoch {epoch:04d} | Total-Loss: {log_entry['total_loss']:.2e}"
-                msg += f" | eqS-Loss: {log_entry['train_l_se_s']:.2e}"
-                msg += f" | R-Loss: {log_entry['val_r_error']:.2e}"
+                msg += f" | eqS-Loss: {log_entry['eqS_loss']:.2e}"
+                msg += f" | R-Loss: {log_entry['r_loss_val']:.2e}"
                 if 'train_min_eig' in log_entry: 
                     msg += f" | MinEig: {log_entry['train_min_eig']:.2e}"
                 print(msg)
