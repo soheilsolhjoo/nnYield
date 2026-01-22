@@ -15,17 +15,17 @@ data:
 #  PERIODIC CHECKS (Used As Intended)
 # ==============================================================================
 dynamic_convexity:
-  enabled: true
+  enabled: false
   samples: 1000    # Generate N FRESH points to test convexity
   interval: 100    # Run this specific test every N epochs
 
 symmetry:
-  enabled: true
+  enabled: false
   samples: 100    # Generate N FRESH equator points to test symmetry
   interval: 10    # Run this specific test every N epochs
 
 anisotropy_ratio:
-  enabled: true
+  enabled: false
   batch_r_fraction: 0.25
   interval: 1      # Mix physics data into training every N steps
 
@@ -48,7 +48,7 @@ model:
 #  WEIGHTS
 # ==============================================================================
 weights:
-  stress: 10.0
+  stress: 1.0
   r_value: 1.0
   symmetry: 0.1
   convexity: 0.1

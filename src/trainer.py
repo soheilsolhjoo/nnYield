@@ -86,6 +86,7 @@ class Trainer:
                 self._restore_checkpoint(self.manager.latest_checkpoint)
 
     def _restore_checkpoint(self, path):
+        # 1
         # # # print(f"[Trainer] Restoring checkpoint from: {path}")
         # # # self.ckpt.restore(path).expect_partial()
         # # # hist_path = os.path.join(self.output_dir, "loss_history.csv")
@@ -95,32 +96,34 @@ class Trainer:
         # # #         self.start_epoch = int(df.iloc[-1]['epoch']) + 1
         # # #         self.history = df.to_dict('records')
         # # # print(f"[Trainer] Resumed at epoch {self.start_epoch}")
-        # # # If the path is a directory, find the latest checkpoint prefix within it
-        # # if os.path.isdir(path):
-        # #     latest = tf.train.latest_checkpoint(os.path.join(path, "checkpoints"))
-        # #     if latest:
-        # #         path = latest
-        # #     else:
-        # #         print(f"[Trainer] No checkpoints found in {path}. Starting from scratch.")
-        # #         return
 
-        # # # Now path is a specific prefix (e.g., .../checkpoints/ckpt-5)
-        # # self.ckpt.restore(path).expect_partial()
+        # 2
+        # # If the path is a directory, find the latest checkpoint prefix within it
+        # if os.path.isdir(path):
+        #     latest = tf.train.latest_checkpoint(os.path.join(path, "checkpoints"))
+        #     if latest:
+        #         path = latest
+        #     else:
+        #         print(f"[Trainer] No checkpoints found in {path}. Starting from scratch.")
+        #         return
+
+        # # Now path is a specific prefix (e.g., .../checkpoints/ckpt-5)
+        # self.ckpt.restore(path).expect_partial()
         
-        # # # Load History
-        # # # We look for the CSV in the parent directory of the checkpoints
-        # # search_dir = os.path.dirname(path) if not os.path.isdir(path) else path
-        # # if "checkpoints" in search_dir:
-        # #     search_dir = os.path.dirname(search_dir)
+        # # Load History
+        # # We look for the CSV in the parent directory of the checkpoints
+        # search_dir = os.path.dirname(path) if not os.path.isdir(path) else path
+        # if "checkpoints" in search_dir:
+        #     search_dir = os.path.dirname(search_dir)
             
-        # # hist_path = os.path.join(search_dir, "loss_history.csv")
-        # # if os.path.exists(hist_path):
-        # #     df = pd.read_csv(hist_path)
-        # #     if not df.empty:
-        # #         self.start_epoch = int(df.iloc[-1]['epoch']) + 1
-        # #         self.history = df.to_dict('records')
+        # hist_path = os.path.join(search_dir, "loss_history.csv")
+        # if os.path.exists(hist_path):
+        #     df = pd.read_csv(hist_path)
+        #     if not df.empty:
+        #         self.start_epoch = int(df.iloc[-1]['epoch']) + 1
+        #         self.history = df.to_dict('records')
         
-        # # print(f"[Trainer] Resumed at epoch {self.start_epoch} from {path}")
+        # print(f"[Trainer] Resumed at epoch {self.start_epoch} from {path}")
         # # 1. Resolve Directory to Checkpoint File
         # if os.path.isdir(path):
         #     latest = tf.train.latest_checkpoint(os.path.join(path, "checkpoints"))
@@ -151,6 +154,8 @@ class Trainer:
         #         self.history = df.to_dict('records')
         
         # print(f"[Trainer] Resumed at epoch {self.start_epoch} from {path}")
+        
+        # 3
         # 1. Resolve Path (Existing logic...)
         if os.path.isdir(path):
             latest = tf.train.latest_checkpoint(os.path.join(path, "checkpoints"))
