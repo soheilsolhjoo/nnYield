@@ -166,23 +166,15 @@ class Trainer:
             print("[Trainer] No checkpoint found. Starting from scratch.")
             return
 
-        # 2. FORCE MODEL & OPTIMIZER BUILD [Critical Fix]
-        # Run a dummy forward pass (builds Model weights)
+        # 2. Force Optimizer Build (Fixes lazy initialization without changing weights)
         dummy_in = tf.zeros((1, 3))
-        _ = self.model(dummy_in)
-        
-        # Run a dummy backward pass (builds Optimizer variables like 'm' and 'v')
-        # We use a zero-gradient update on a dummy variable to trigger build without messing up weights
-        with tf.GradientTape() as tape:
-            dummy_loss = tf.reduce_sum(self.model(dummy_in))
-        grads = tape.gradient(dummy_loss, self.model.trainable_variables)
-        self.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
+        _ = self.model(dummy_in)  # Creates model variables
+        self.optimizer.build(self.model.trainable_variables)  # Creates optimizer slots
 
-        # 3. NOW restore. The slots exist, so the optimizer state will load.
-        status = self.ckpt.restore(path)
-        status.expect_partial() # Safe now because we know variables exist
+        # 3. Restore State (Weights + Optimizer Momentum)
+        self.ckpt.restore(path).expect_partial()
         
-        # 4. Load History (Existing logic...)
+        # 4. Load History & Start Epoch
         search_dir = os.path.dirname(os.path.dirname(path)) if "checkpoints" in path else os.path.dirname(path)
         hist_path = os.path.join(search_dir, "loss_history.csv")
         if os.path.exists(hist_path):
@@ -250,10 +242,10 @@ class Trainer:
         d_eps_t = -(df_ds11 + df_ds22)
         d_eps_w = df_ds11 * sin2 + df_ds22 * cos2 - 2 * df_ds12 * sincos
         
-        r_pred = d_eps_w / (d_eps_t + 1e-8)
+        pred_r = d_eps_w / (d_eps_t + 1e-8)
         
         # 3. Compute Mean Absolute Error
-        r_error = tf.reduce_mean(tf.abs(r_pred - target_r))
+        r_error = tf.reduce_mean(tf.abs(pred_r - target_r))
         return float(r_error)
 
     # =========================================================================
@@ -452,8 +444,8 @@ class Trainer:
                 msg = f"Epoch {epoch:04d} | Total-Loss: {log_entry['total_loss']:.2e}"
                 msg += f" | eqS-Loss: {log_entry['eqS_loss']:.2e}"
                 msg += f" | R-Loss: {log_entry['r_loss_val']:.2e}"
-                if 'train_min_eig' in log_entry: 
-                    msg += f" | MinEig: {log_entry['train_min_eig']:.2e}"
+                if 'min_eig_train' in log_entry: 
+                    msg += f" | MinEig: {log_entry['min_eig_train']:.2e}"
                 print(msg)
 
             # --- E. CHECKPOINTING ---
