@@ -44,6 +44,9 @@ setup_silent_logging(cfg_path)
 import tensorflow as tf
 # tf.get_logger().setLevel('ERROR')
 # tf.autograph.set_verbosity(0)
+gpus = tf.config.list_physical_devices('GPU')
+for gpu in gpus:
+    tf.config.experimental.set_memory_growth(gpu, True)
 
 import shutil
 import pandas as pd
