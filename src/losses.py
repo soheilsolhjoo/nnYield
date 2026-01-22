@@ -6,7 +6,7 @@ class PhysicsLoss:
 
     def calculate_losses(self, model, inputs, targets, weights, run_convexity=False, run_symmetry=False):
         (inputs_s, inputs_p) = inputs
-        (target_s, target_p_stress, target_r, geo_p) = targets
+        (target_s, target_p, target_r, geo_p) = targets
         
         has_shape_data = tf.greater(tf.shape(inputs_s)[0], 0)
         has_phys_data = tf.greater(tf.shape(inputs_p)[0], 0)
@@ -27,10 +27,10 @@ class PhysicsLoss:
         if (weights.r_value > 0) and has_phys_data:
             with tf.GradientTape() as tape:
                 tape.watch(inputs_p)
-                pred_pot = model(inputs_p)
+                pred_p = model(inputs_p)
             if weights.stress > 0:
-                l_se_path = tf.reduce_mean(tf.square(pred_pot - target_p_stress))
-            grads = tape.gradient(pred_pot, inputs_p)
+                l_se_path = tf.reduce_mean(tf.square(pred_p - target_p))
+            grads = tape.gradient(pred_p, inputs_p)
             
             df_ds11, df_ds22, df_ds12 = grads[:, 0:1], grads[:, 1:2], grads[:, 2:3]
             sin2, cos2, sincos = geo_p[:, 0:1], geo_p[:, 1:2], geo_p[:, 2:3]
@@ -39,8 +39,8 @@ class PhysicsLoss:
             d_eps_t = -(df_ds11 + df_ds22)
             d_eps_w = df_ds11 * sin2 + df_ds22 * cos2 - 2 * df_ds12 * sincos
             
-            r_pred = d_eps_w / (d_eps_t + 1e-8)
-            l_r = tf.reduce_mean(tf.abs(r_pred - target_r))
+            pred_r = d_eps_w / (d_eps_t + 1e-8)
+            l_r = tf.reduce_mean(tf.abs(pred_r - target_r))
 
         l_se_total = l_se_shape + l_se_path
 
@@ -100,7 +100,13 @@ class PhysicsLoss:
                      (weights.symmetry * l_sym)
 
         return {
-            'total_loss': total_loss, 'l_se_total': l_se_total, 'l_r': l_r,
-            'l_conv_static': l_conv_static, 'l_conv_dynamic': l_conv_dynamic,
-            'l_sym': l_sym, 'min_eig': min_eig_val
+            'total_loss': total_loss, 
+            'l_se_total': l_se_total,
+            'l_se_shape': l_se_shape,  # Restore this
+            'l_se_path': l_se_path,    # Restore this
+            'l_r': l_r,
+            'l_conv_static': l_conv_static, 
+            'l_conv_dynamic': l_conv_dynamic,
+            'l_sym': l_sym, 
+            'min_eig': min_eig_val
         }
