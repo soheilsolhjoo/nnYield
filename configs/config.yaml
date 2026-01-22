@@ -15,17 +15,17 @@ data:
 #  PERIODIC CHECKS (Used As Intended)
 # ==============================================================================
 dynamic_convexity:
-  enabled: false
+  enabled: true
   samples: 1000    # Generate N FRESH points to test convexity
   interval: 100    # Run this specific test every N epochs
 
 symmetry:
-  enabled: false
+  enabled: true
   samples: 100    # Generate N FRESH equator points to test symmetry
   interval: 10    # Run this specific test every N epochs
 
 anisotropy_ratio:
-  enabled: false
+  enabled: true
   batch_r_fraction: 0.25
   interval: 1      # Mix physics data into training every N steps
 
@@ -39,7 +39,7 @@ physics:
   N: 1.5
 
 model:
-  hidden_layers: [32, 16, 8]
+  hidden_layers: [32, 32, 32]
   activation: "softplus"
   ref_stress: 1.0
   use_icnn_constraints: false
@@ -60,7 +60,7 @@ weights:
 training:
   k_folds: 1
   epochs: 1000
-  batch_size: 32
+  batch_size: 64
   learning_rate: 0.001
   save_dir: "outputs"
   
