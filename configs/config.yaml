@@ -8,24 +8,24 @@ data:
   input_range: [-2.0, 2.0]
   symmetry: true
   samples:
-    loci: 200      # Training Batch: Random Shape Points
+    loci: 2000      # Training Batch: Random Shape Points
     uniaxial: 20   # Training Batch: Equidistant Physics Points
 
 # ==============================================================================
 #  PERIODIC CHECKS (Used As Intended)
 # ==============================================================================
 dynamic_convexity:
-  enabled: true
+  enabled: false
   samples: 1000    # Generate N FRESH points to test convexity
-  interval: 100    # Run this specific test every N epochs
+  interval: 50    # Run this specific test every N epochs
 
 symmetry:
-  enabled: true
+  enabled: false
   samples: 100    # Generate N FRESH equator points to test symmetry
   interval: 10    # Run this specific test every N epochs
 
 anisotropy_ratio:
-  enabled: true
+  enabled: false
   batch_r_fraction: 0.25
   interval: 1      # Mix physics data into training every N steps
 
@@ -51,8 +51,8 @@ weights:
   stress: 1.0
   r_value: 1.0
   symmetry: 0.1
-  convexity: 0.1
-  dynamic_convexity: 1.0
+  dynamic_convexity: 0.5
+  # convexity: 0.1 -> disabled for now
 
 # ==============================================================================
 #  TRAINING
@@ -65,7 +65,7 @@ training:
   save_dir: "outputs"
   
   checkpoint_interval: 100   # Restored name
-  print_interval: 50
+  print_interval: 25
   overwrite: true
   
   convexity_warmup: 500
