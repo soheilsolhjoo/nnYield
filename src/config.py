@@ -70,7 +70,7 @@ class WeightsConfig:
     stress: float
     r_value: float
     symmetry: float
-    convexity: float
+    # convexity: float
     dynamic_convexity: float
 
 # =============================================================================
