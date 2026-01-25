@@ -226,6 +226,10 @@ class Trainer:
             tape.watch(inputs_p)
             pred_pot = self.model(inputs_p)
         
+        # 1. Stress Path Error (Area/Locus accuracy)
+        se_error = tf.reduce_mean(tf.square(pred_pot - target_p))
+        
+        # 2. R-value Path Error
         grads = tape.gradient(pred_pot, inputs_p)
         
         # Gradients
@@ -246,7 +250,7 @@ class Trainer:
         
         # 3. Compute Mean Absolute Error
         r_error = tf.reduce_mean(tf.abs(pred_r - target_r))
-        return float(r_error)
+        return float(se_error), float(r_error)
 
     # =========================================================================
     #  TRAINING STEP
@@ -338,7 +342,6 @@ class Trainer:
             )
 
             # --- B. CURRICULUM LEARNING (WARMUPS) ---
-            ## 1. Convexity Warmup
             # 1. Convexity Warmup
             if cfg.convexity_warmup > 0:
                 # Linear ramp: 0 -> Target
@@ -395,7 +398,7 @@ class Trainer:
                     self.w.stress, 
                     self.w.r_value, 
                     self.w.symmetry, 
-                    self.w.convexity, 
+                    0.0, #self.w.convexity, 
                     self.w.dynamic_convexity, 
                     run_convexity, 
                     run_symmetry
@@ -407,7 +410,14 @@ class Trainer:
 
             # --- D. AGGREGATION & LOGGING ---
             avg_metrics = pd.DataFrame(epoch_metrics).mean().to_dict()
-            val_r_error = self.validate_on_path() # Required for stopping/logging
+            
+            # Initialize defaults
+            val_es_error = 0.0
+            val_r_error = 0.0
+            
+            # Check if Physics Path is active before validating
+            if self.config.anisotropy_ratio.enabled and self.w.r_value > 0:
+                val_es_error, val_r_error = self.validate_on_path()
 
             # Consolidated log entry: Each metric has exactly one unique name
             log_entry = {
@@ -415,9 +425,9 @@ class Trainer:
                 'time': previous_time + (time.time() - session_start),
                 'total_loss': avg_metrics.get('total_loss', 0),
                 'eqS_loss': avg_metrics.get('l_se_total', 0),
+                'eqS_loss_val': val_es_error,
                 'r_loss_val': val_r_error,
                 'r_loss_train': avg_metrics.get('l_r', 0),
-                'conv_static_loss': avg_metrics.get('l_conv_static', 0),
                 'conv_dynamic_loss': avg_metrics.get('l_conv_dynamic', 0),
                 'sym_loss': avg_metrics.get('l_sym', 0),
                 'min_eig_train': avg_metrics.get('min_eig', 0)
@@ -429,7 +439,6 @@ class Trainer:
                 'l_se_shape': 'train_l_se_shape',
                 'l_se_path': 'train_l_se_path',
                 'l_r': 'r_loss_train',
-                'l_conv_static': 'conv_static_loss',
                 'l_conv_dynamic': 'conv_dynamic_loss',
                 'l_sym': 'sym_loss',
                 'min_eig': 'min_eig_train'
@@ -477,9 +486,16 @@ class Trainer:
                      pass_conv = True
             
             # pass_r = True
-            pass_r    = (val_r_error <= cfg.r_threshold)
-            # if cfg.r_threshold is not None:
-            #     pass_r = (avg_metrics['l_r'] <= cfg.r_threshold)
+            # Default to True so it doesn't block stopping if R-threshold isn't set
+            pass_r = True 
+            
+            if cfg.r_threshold is not None:
+                if self.config.anisotropy_ratio.enabled and self.w.r_value > 0:
+                    # Use strict path validation when physics is on
+                    pass_r = (val_r_error <= cfg.r_threshold)
+                else:
+                    # Fallback to training batch average when physics is off
+                    pass_r = (avg_metrics.get('l_r', 0.0) <= cfg.r_threshold)
 
             should_stop = (pass_loss and pass_conv and pass_r)
             any_criteria_set = (cfg.loss_threshold or cfg.convexity_threshold or cfg.r_threshold)
