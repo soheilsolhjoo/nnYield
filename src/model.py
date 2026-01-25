@@ -130,3 +130,22 @@ class HomogeneousYieldModel(tf.keras.Model):
         se_pred = self.ref_stress * (r_total / (R_yield + 1e-8))
         
         return se_pred
+    
+    def predict_radius(self, inputs):
+        """
+        Exposes the raw Yield Radius (R_yield) for a given input state.
+        Used to identify exactly where the neural network's yield locus is.
+        """
+        # 1. Standard Normalization
+        s11, s22, s12 = inputs[:, 0:1], inputs[:, 1:2], inputs[:, 2:3]
+        r_total = tf.sqrt(tf.square(s11) + tf.square(s22) + tf.square(s12) + 1e-8)
+        
+        # 2. Extract direction components (s12 is squared for symmetry)
+        d1, d2, d3 = s11/r_total, s22/r_total, tf.square(s12/r_total)
+        features = tf.concat([d1, d2, d3], axis=1)
+        
+        # 3. Network Forward Pass
+        x = features
+        for layer in self.hidden_layers:
+            x = layer(x)
+        return self.radius_out(x)
