@@ -185,8 +185,8 @@ def main():
                 trainer = Trainer(config, config_path=args.config, fold_idx=k+1)
                 
                 # Run Training
-                # Note: We pass the pre-sliced datasets directly to run()
-                final_metric = trainer.run(train_dataset=(ds_train, None, steps), val_dataset=ds_val)
+                # Note: We pass the pre-sliced datasets directly to train()
+                final_metric = trainer.train(train_dataset=(ds_train, None, steps), val_dataset=ds_val)
                 
                 fold_results.append({'fold': k+1, 'val_loss': final_metric, 'dir': trainer.output_dir})
 

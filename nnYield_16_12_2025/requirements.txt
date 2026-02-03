@@ -1,0 +1,7 @@
+tensorflow
+numpy
+matplotlib
+pandas
+pyyaml
+tf2onnx
+scipy

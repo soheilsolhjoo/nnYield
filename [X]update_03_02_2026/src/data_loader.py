@@ -50,6 +50,24 @@ class YieldDataLoader:
             steps_per_epoch (int): Calculated number of batches to run per epoch.
         """
         # --- 1. CONFIGURATION CHECK ---
+        # Handle both object and dict access for robustness
+        if isinstance(self.config, dict):
+            data_cfg = self.config['data']
+            train_cfg = self.config['training']
+            ani_cfg = self.config['anisotropy_ratio']
+            
+            n_uni = data_cfg['samples'].get('uniaxial', 0)
+            w_r = train_cfg['weights']['r_value']
+            batch_r_frac = ani_cfg['batch_r_fraction']
+            is_enabled = ani_cfg['enabled']
+        else:
+            n_uni = self.config.data.samples.get('uniaxial', 0)
+            w_r = self.config.training.weights.r_value
+            batch_r_frac = self.config.anisotropy_ratio.batch_r_fraction
+            is_enabled = self.config.anisotropy_ratio.enabled
+        
+        use_dual_stream = (n_uni > 0) and (w_r > 0) and (batch_r_frac > 0) and is_enabled
+        
         # Accessors updated to match src/config.py Dataclass structure
         
         # 'samples' is a dict inside DataConfig
@@ -144,9 +162,24 @@ class YieldDataLoader:
         - **Linspace Sampling** (Physics): Equidistant points (0, 5, ... 90 deg) for R-curves.
         - **Anchor Injection**: Fixed points (Uniaxial X/Y, Equi-Biaxial).
         """
+        # Handle both object and dict access
+        # if isinstance(self.config, dict):
+            # data_samples = self.config['data']['samples']
+            # ref_stress = self.config['model']['ref_stress']
+            # phys = self.config['physics'] # Assumes dictionary
+            # # Convert dict to simple object if needed, or use dict access:
+            # F, G, H, N = phys['F'], phys['G'], phys['H'], phys['N']
+            # use_symmetry = self.config['data']['symmetry']
+        # else:
+        #     data_samples = self.config.data.samples
+            # ref_stress = self.config.model.ref_stress
+            # phys = self.config.physics
+            # F, G, H, N = phys.F, phys.G, phys.H, phys.N
+            # use_symmetry = self.config.data.symmetry
+            
         # Load Sample Counts
-        n_gen = self.config.data.samples.get('loci', 1000)
-        n_uni = self.config.data.samples.get('uniaxial', 0) if needs_physics else 0
+        n_gen = self.config.data.samples['loci']
+        n_uni = self.config.data.samples['uniaxial'] if needs_physics else 0
         
         # Load Physics Parameters (Hill48 Coefficients)
         ref_stress = self.config.model.ref_stress

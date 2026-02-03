@@ -36,7 +36,6 @@ class SanityChecker:
         # self._load_weights() 
         
         self.exp_data = self._load_experiments()
-        self.loader = YieldDataLoader(config.to_dict())
 
     def _load_weights(self):
         weights_path = os.path.join(self.config['training']['save_dir'],
@@ -379,110 +378,50 @@ class SanityChecker:
     #  CHECK 3: R-VALUES VS ANGLE
     # =========================================================================
     def check_r_values(self):
-        print("Running R-value & Stress Trace Analysis...")
+        print("Running R-value Check...")
+        alpha_deg = np.linspace(0, 90, 91).astype(np.float32)
+        alpha_rad = np.radians(alpha_deg)
         
-        # 1. Setup Angles (0 to 90 degrees)
-        # We sample points representing uniaxial tension at various angles
-        n_steps = 91
-        angles = np.linspace(0, 90, n_steps).astype(np.float32)
-        rads = np.radians(angles)
+        # 1. Base Uniaxial Vector
+        u11 = np.cos(alpha_rad)**2
+        u22 = np.sin(alpha_rad)**2
+        u12 = np.sin(alpha_rad)*np.cos(alpha_rad)
         
-        # 2. Prepare Unit Vectors for Uniaxial Stress
-        # For uniaxial tension at angle alpha:
-        # s11 = cos^2(alpha), s22 = sin^2(alpha), s12 = sin(alpha)cos(alpha)
-        sin_a, cos_a = np.sin(rads), np.cos(rads)
-        u11 = cos_a**2
-        u22 = sin_a**2
-        u12 = sin_a * cos_a
-        
-        # Stack into batch: (N, 3)
-        inputs_unit = np.stack([u11, u22, u12], axis=1).astype(np.float32)
-        inputs_unit_tf = tf.constant(inputs_unit)
+        unit_inputs = np.stack([u11, u22, u12], axis=1)
 
-        # 3. Retrieve Benchmark Physics
-        phys = self.config['physics']
-        F, G, H, N = phys['F'], phys['G'], phys['H'], phys['N']
+        # 2. Scale to NN Yield Surface (STRICT FIX)
+        # Previously scaled to Hill48 surface. Now we scale to the NN surface.
+        inputs_tf = tf.constant(unit_inputs)
+        pred_se = self.model(inputs_tf).numpy().flatten()
+        
         ref_stress = self.config['model']['ref_stress']
+        radii = ref_stress / (pred_se + 1e-8)
+        
+        s11 = u11 * radii
+        s22 = u22 * radii
+        s12 = u12 * radii
+        
+        # 3. Calculate Gradients
+        (_, grad_nn, _), (_, grad_vm) = self._get_predictions(s11, s22, s12)
+        rv_nn = self._calc_r_values(grad_nn, alpha_rad)
+        rv_vm = self._calc_r_values(grad_vm, alpha_rad)
+        
+        # ... (Plotting remains the same) ...
+        plt.figure(figsize=(7, 5))
+        plt.plot(alpha_deg, rv_vm, 'k--', label='Benchmark')
+        plt.plot(alpha_deg, rv_nn, 'r-', label='NN Prediction')
+        
+        all_vals = np.concatenate([rv_nn, rv_vm])
+        valid = all_vals[np.abs(all_vals) < 10]
+        if len(valid) > 0:
+            dmin, dmax = valid.min(), valid.max()
+            margin = (dmax - dmin) * 0.2 if dmax!=dmin else 0.5
+            plt.ylim(max(0, dmin-margin), dmax+margin)
+            
+        plt.title("R-values"); plt.xlabel("Angle (deg)"); plt.ylabel("R-value")
+        plt.legend(); plt.grid(True, alpha=0.3)
+        plt.savefig(os.path.join(self.plot_dir, "r_values.png")); plt.close()
 
-        # --- BENCHMARK CALCULATIONS (Hill48) ---
-        # A. Benchmark Yield Stress
-        # Hill Condition: F*s22^2 + G*s11^2 + H(s11-s22)^2 + 2N*s12^2 = (Ref/Sigma)^2
-        # Solving for Sigma:
-        term = F*u22**2 + G*u11**2 + H*(u11-u22)**2 + 2*N*u12**2
-        sigma_bench = ref_stress / np.sqrt(term + 1e-8)
-        
-        # B. Benchmark R-values (Analytical Gradients)
-        # We compute gradients of Hill function at the yield surface points
-        # Points: P = unit_vec * sigma_bench
-        s11_b = u11 * sigma_bench
-        s22_b = u22 * sigma_bench
-        s12_b = u12 * sigma_bench
-        denom = ref_stress # at yield surface, value is ref_stress
-        
-        dg11 = (G*s11_b + H*(s11_b-s22_b)) / denom
-        dg22 = (F*s22_b - H*(s11_b-s22_b)) / denom
-        dg12 = (2*N*s12_b) / denom
-        
-        d_eps_t = -(dg11 + dg22)
-        d_eps_w = dg11*sin_a**2 + dg22*cos_a**2 - 2*dg12*sin_a*cos_a
-        r_bench = d_eps_w / (d_eps_t + 1e-8)
-
-        # --- NEURAL NETWORK CALCULATIONS ---
-        # A. NN Yield Stress
-        # Since Model(sigma) = Equivalent_Stress
-        # And Model(k * unit) = k * Model(unit)  (Homogeneity)
-        # Then Yield Stress (k) = Ref_Stress / Model(unit)
-        
-        # First, get prediction for unit vectors to find the scaling factor
-        pred_unit = self.model(inputs_unit_tf).numpy().flatten()
-        sigma_nn = ref_stress / (pred_unit + 1e-8)
-        
-        # B. NN R-values (Gradients at the Predicted Yield Surface)
-        # Now we project the unit vectors onto the NN's yield surface
-        inputs_nn_surf = inputs_unit * sigma_nn[:, None]
-        inputs_nn_tf = tf.constant(inputs_nn_surf)
-        
-        with tf.GradientTape() as tape:
-            tape.watch(inputs_nn_tf)
-            pred_val = self.model(inputs_nn_tf)
-        
-        grads = tape.gradient(pred_val, inputs_nn_tf).numpy()
-        
-        # Normalize gradients (normal vectors)
-        gnorms = np.linalg.norm(grads, axis=1, keepdims=True) + 1e-8
-        grads_n = grads / gnorms
-        
-        ds_11, ds_22, ds_12 = grads_n[:,0], grads_n[:,1], grads_n[:,2]
-        
-        # Calculate R from NN gradients
-        d_eps_t_nn = -(ds_11 + ds_22)
-        d_eps_w_nn = ds_11*sin_a**2 + ds_22*cos_a**2 - 2*ds_12*sin_a*cos_a
-        r_nn = d_eps_w_nn / (d_eps_t_nn + 1e-8)
-
-        # --- PLOTTING ---
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 10), sharex=True)
-        
-        # Plot 1: R-values
-        ax1.plot(angles, r_bench, 'k--', linewidth=2, label='Benchmark (Hill48)')
-        ax1.plot(angles, r_nn, 'r-', linewidth=2, alpha=0.8, label='NN Prediction')
-        ax1.set_ylabel("R-value")
-        ax1.set_title("Anisotropy (R-value) vs. Angle")
-        ax1.grid(True, alpha=0.3)
-        ax1.legend()
-        
-        # Plot 2: Yield Stress
-        ax2.plot(angles, sigma_bench, 'k--', linewidth=2, label='Benchmark')
-        ax2.plot(angles, sigma_nn, 'b-', linewidth=2, alpha=0.8, label='NN Prediction')
-        ax2.set_ylabel("Yield Stress (MPa)")
-        ax2.set_xlabel("Angle to Rolling Direction (deg)")
-        ax2.set_title("Directional Yield Strength")
-        ax2.grid(True, alpha=0.3)
-        ax2.legend()
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.plot_dir, "r_values.png"))
-        plt.close()
-    
     # =========================================================================
     #  CHECK 4: FULL DOMAIN HEATMAPS
     # =========================================================================
@@ -703,114 +642,94 @@ class SanityChecker:
     # =========================================================================
     def check_global_statistics(self):
         print("Running Global Statistics (Homogeneity & Error Analysis)...")
+        original_samples = self.config['data']['samples']
+        # Use sufficient samples for good statistics
+        self.config['data']['samples'] = {'loci': 2000, 'uniaxial': 1000}
         
-        # 1. Generate Evaluation Data
-        # We need physics data enabled to check R-values and handle the 6-item tuple
-        data_shape, data_phys = self.loader._generate_raw_data(needs_physics=True)
+        loader = YieldDataLoader(self.config)
         
-        inputs_s, targets_s = data_shape
+        # FIX: Use _generate_raw_data to get the separated tuples (Shape, Phys)
+        # instead of get_numpy_data() which now returns flattened arrays.
+        (data_shape, data_phys) = loader._generate_raw_data(needs_physics=True)
         
-        # FIX: Unpack 6 items to avoid ValueError
-        # Structure: (inputs, target_stress, target_r, geometry, mask, target_stress_uni)
-        inputs_p, _, r_target_p, geo_p, mask_p, _ = data_phys
+        self.config['data']['samples'] = original_samples 
         
-        # --- A. Stress Error (MSE on Yield Surface Shape) ---
-        inputs_tf = tf.constant(inputs_s)
-        pred_se = self.model(inputs_tf).numpy()
-        mse_se = np.mean(np.square(pred_se - targets_s))
+        # --- 1. STRESS STATISTICS (Using Shape Data) ---
+        inputs_s, _ = data_shape
         
-        # --- B. R-value Error (MAE Geometric) ---
-        mae_r = 0.0
-        r_error_list = []
+        # APPLY RANDOM SCALING (Homogeneity Check)
+        n_samples = len(inputs_s)
+        scales = np.random.uniform(0.5, 2.0, size=(n_samples, 1)).astype(np.float32)
+        inputs_scaled = inputs_s * scales
         
-        if len(inputs_p) > 0:
-            inputs_p_tf = tf.constant(inputs_p)
-            
-            with tf.GradientTape() as tape:
-                tape.watch(inputs_p_tf)
-                pred_p = self.model(inputs_p_tf)
-            
-            grads = tape.gradient(pred_p, inputs_p_tf).numpy()
-            
-            # Normalize gradients to get normal vectors
-            gnorms = np.linalg.norm(grads, axis=1, keepdims=True) + 1e-8
-            grads_n = grads / gnorms
-            
-            # Components
-            ds_11, ds_22, ds_12 = grads_n[:,0], grads_n[:,1], grads_n[:,2]
-            sin2, cos2, sc = geo_p[:,0], geo_p[:,1], geo_p[:,2]
-            
-            # Strain increments
-            d_eps_thick = -(ds_11 + ds_22)
-            d_eps_width = ds_11*sin2 + ds_22*cos2 - 2*ds_12*sc
-            
-            # Geometric Error calculation: | Numerator / Denominator |
-            numerator = d_eps_width - (r_target_p.flatten() * d_eps_thick)
-            denominator = np.sqrt(1.0 + np.square(r_target_p.flatten()))
-            geo_error = np.abs(numerator / denominator)
-            
-            # Filter with mask
-            r_error_list = geo_error * mask_p.flatten()
-            
-            # Only count masked (valid) points for MAE
-            if np.sum(mask_p) > 0:
-                mae_r = np.sum(r_error_list) / np.sum(mask_p)
-                # Filter list for plotting (keep only valid points)
-                r_error_list = r_error_list[mask_p.flatten() > 0]
-            else:
-                mae_r = 0.0
-                r_error_list = []
-
-        # --- C. Homogeneity Check ---
-        # Test homogeneity degree 1: f(k * sigma) approx k * f(sigma)
-        rand_idx = np.random.choice(len(inputs_s), min(100, len(inputs_s)), replace=False)
-        sample_pts = inputs_s[rand_idx]
-        k = 2.0
+        s11_s, s22_s, s12_s = inputs_scaled[:,0], inputs_scaled[:,1], inputs_scaled[:,2]
+        (val_nn, _, _), (val_vm, _) = self._get_predictions(s11_s, s22_s, s12_s)
         
-        pred_base = self.model(sample_pts).numpy().flatten()
-        pred_scaled = self.model(sample_pts * k).numpy().flatten()
+        # Plot A: Homogeneity Parity
+        plt.figure(figsize=(6, 6))
+        plt.scatter(val_vm, val_nn, alpha=0.3, s=10, c='blue', label='Scaled Data')
         
-        # Error: |f(kx) - k f(x)|
-        homog_error = np.mean(np.abs(pred_scaled - k * pred_base))
-
-        print(f"   -> Stress MSE: {mse_se:.2e}")
-        print(f"   -> R-value MAE (Geo): {mae_r:.2e}")
-        print(f"   -> Homogeneity Err (k=2): {homog_error:.2e}")
+        dmin, dmax = min(val_vm.min(), val_nn.min()), max(val_vm.max(), val_nn.max())
+        plt.plot([dmin, dmax], [dmin, dmax], 'k--', label='Perfect Fit')
         
-        # --- D. SAVE TEXT REPORT ---
-        with open(os.path.join(self.plot_dir, "global_stats.txt"), "w") as f:
-            f.write("Global Statistics Report\n")
-            f.write("========================\n")
-            f.write(f"Stress MSE: {mse_se:.6e}\n")
-            f.write(f"R-value MAE: {mae_r:.6e}\n")
-            f.write(f"Homogeneity Error: {homog_error:.6e}\n")
-
-        # --- E. GENERATE PLOTS ---
-        plt.figure(figsize=(12, 5))
-        
-        # Plot 1: Stress Prediction Histogram
-        plt.subplot(1, 2, 1)
-        plt.hist(pred_se, bins=50, alpha=0.7, color='blue', label='Pred')
-        plt.axvline(x=np.mean(targets_s), color='red', linestyle='--', label='Target')
-        plt.title(f"Yield Stress Distribution\nMSE: {mse_se:.2e}")
-        plt.xlabel("Predicted Yield Stress")
+        plt.title(f"Stress Parity (Homogeneity Check)\nRange: [{dmin:.1f}, {dmax:.1f}] MPa")
+        plt.xlabel("True Equivalent Stress (Von Mises)")
+        plt.ylabel("Predicted Equivalent Stress (NN)")
         plt.legend()
         plt.grid(True, alpha=0.3)
-        
-        # Plot 2: R-value Error Histogram
-        plt.subplot(1, 2, 2)
-        if len(r_error_list) > 0:
-            plt.hist(r_error_list, bins=50, alpha=0.7, color='green')
-            plt.title(f"R-value Geometric Error\nMAE: {mae_r:.2e}")
-            plt.xlabel("Error Magnitude")
-            plt.yscale('log')
-        else:
-            plt.text(0.5, 0.5, "No R-value Data", ha='center')
-        
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.plot_dir, "global_stats_plots.png"))
+        plt.savefig(os.path.join(self.plot_dir, "stats_parity_stress.png"))
         plt.close()
+
+        # Plot B: Relative Error Histogram
+        rel_error = (val_nn - val_vm) / (val_vm + 1e-8)
+        
+        plt.figure(figsize=(8, 5))
+        plt.hist(rel_error, bins=50, color='skyblue', edgecolor='black')
+        plt.axvline(0, color='red', linestyle='--', label='Zero Error')
+        
+        mean_err = np.mean(rel_error)
+        std_err = np.std(rel_error)
+        plt.title(f"Stress Relative Error Distribution\nMean: {mean_err:.2e}, Std: {std_err:.2e}")
+        plt.xlabel("Relative Error ((NN - True) / True)")
+        plt.ylabel("Count")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig(os.path.join(self.plot_dir, "stats_histogram_error.png"))
+        plt.close()
+        
+        # --- 2. R-VALUE STATISTICS (Using Physics Data) ---
+        inputs_p, _, r_target_p, geo_p, mask_p, _ = data_phys
+        s11_p, s22_p, s12_p = inputs_p[:,0], inputs_p[:,1], inputs_p[:,2]
+        
+        # Reconstruct alpha
+        sin_sq, cos_sq = geo_p[:, 0], geo_p[:, 1]
+        alpha_rec = np.arctan2(np.sqrt(sin_sq), np.sqrt(cos_sq))
+        
+        (_, grad_nn_p, _), _ = self._get_predictions(s11_p, s22_p, s12_p)
+        r_nn_p = self._calc_r_values(grad_nn_p, alpha_rec)
+        r_vm_p = r_target_p.flatten()
+        
+        # Filter valid uniaxial points
+        valid_idx = (mask_p.flatten() == 1.0) & (np.abs(r_vm_p) < 20)
+        
+        if np.sum(valid_idx) > 0:
+            plt.figure(figsize=(6, 6))
+            plt.scatter(r_vm_p[valid_idx], r_nn_p[valid_idx], alpha=0.5, s=20, c='green')
+            
+            vals = np.concatenate([r_vm_p[valid_idx], r_nn_p[valid_idx]])
+            dmin, dmax = vals.min(), vals.max()
+            margin = (dmax - dmin) * 0.1 if dmax != dmin else 0.1
+            lims = [max(0, dmin - margin), dmax + margin]
+            
+            plt.plot(lims, lims, 'k--', label='Perfect')
+            plt.xlim(lims); plt.ylim(lims)
+            plt.title(f"R-value Parity (N={np.sum(valid_idx)})")
+            plt.xlabel("True R"); plt.ylabel("Pred R")
+            plt.grid(True, alpha=0.3); plt.legend()
+            plt.savefig(os.path.join(self.plot_dir, "stats_parity_r.png"))
+            plt.close()
+        else:
+            print("   [Warn] No valid uniaxial points for R-parity check.")
     
     # =========================================================================
     #  CHECK 7: DETAILED LOSS CURVES

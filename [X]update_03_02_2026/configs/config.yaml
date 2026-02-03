@@ -59,8 +59,8 @@ weights:
 # ==============================================================================
 training:
   k_folds: 1
-  epochs: 1000
-  batch_size: 64
+  epochs: 10000
+  batch_size: 32
   learning_rate: 0.001
   save_dir: "outputs"
   
@@ -70,9 +70,13 @@ training:
   
   convexity_warmup: 500
   r_warmup: 200
+  
+  # Regularization
+  l2_regularization: 0.000
 
   # STOPPING THRESHOLDS (Original switches restored)
-  loss_threshold: 0.005        # Stop if Total Loss < X
+  loss_threshold: 0.0005        # Stop if Total Loss < X
   r_threshold: 0.02            # Stop if R-error < X
   convexity_threshold: -0.0001 # Stop if Min Eig >= X
   # gnorm_threshold: null        # Disabled
+# gnorm_threshold: 0.01          # Stability: Max allowed gradient norm | NOTE: There is no weight-loss directly connected to this switch.

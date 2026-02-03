@@ -93,6 +93,9 @@ class TrainingConfig:
     convexity_warmup: int
     r_warmup: int
     
+    # Regularization
+    l2_regularization: float
+    
     # Stopping Thresholds (gnorm_threshold removed)
     loss_threshold: Optional[float]
     r_threshold: Optional[float]
@@ -146,6 +149,9 @@ class Config:
                 # Curriculum
                 convexity_warmup=data['training'].get('convexity_warmup', 0),
                 r_warmup=data['training'].get('r_warmup', 0),
+                
+                # Regularization
+                l2_regularization=data['training'].get('l2_regularization', 0.0),
                 
                 # Stopping Thresholds
                 loss_threshold=data['training'].get('loss_threshold'),

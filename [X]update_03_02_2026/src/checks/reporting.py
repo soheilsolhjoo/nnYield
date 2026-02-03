@@ -75,7 +75,7 @@ class ReportingChecks:
         
         # 3. Calculate Strains & R-value
         d_eps_t = -(dg11 + dg22) # Thickness strain
-        d_eps_w = dg11*sin_a**2 + dg22*cos_a**2 - 2*dg12*sin_a*cos_a # Width strain
+        d_eps_w = dg11*sin_a**2 + dg22*cos_a**2 - dg12*sin_a*cos_a # Width strain
         
         # Avoid division by zero for R-value
         r_bench = np.divide(d_eps_w, d_eps_t, out=np.zeros_like(d_eps_w), where=np.abs(d_eps_t)>1e-8)
@@ -109,7 +109,7 @@ class ReportingChecks:
         
         # 4. Calculate R-value from Gradients
         d_eps_t_nn = -(ds_11 + ds_22)
-        d_eps_w_nn = ds_11*sin_a**2 + ds_22*cos_a**2 - 2*ds_12*sin_a*cos_a
+        d_eps_w_nn = ds_11*sin_a**2 + ds_22*cos_a**2 - ds_12*sin_a*cos_a
         r_nn = np.divide(d_eps_w_nn, d_eps_t_nn, out=np.zeros_like(d_eps_w_nn), where=np.abs(d_eps_t_nn)>1e-8)
 
         # =========================================================

@@ -86,67 +86,93 @@ class PhysicsChecks:
     def check_2d_loci_slices(self):
         """
         Plots 2D cross-sections of the yield surface at increasing shear stress levels.
-        
-        Physics:
-        - At Shear=0 (S12=0), we see the standard Plane Stress ellipse.
-        - As Shear increases, the elastic domain should shrink (Von Mises / Hill criterion).
-        - At Max Shear, the domain should collapse to a point or small region.
-        
-        Output: plots/yield_loci_slices.png
+        Method: Cylindrical formulation (matches data loader).
         """
         print("Running 2D Loci Slices Check...")
-        ref_stress = self.config['model']['ref_stress']
-        phys = self.config.get('physics', {})
-        N = phys.get('N', 1.5)
         
-        # Calculate the theoretical max shear stress for Hill48
-        max_shear = ref_stress / np.sqrt(2*N)
+        # 1. Setup Parameters
+        ref = self.config['model']['ref_stress']
+        phys = self.config['physics']
+        F, G, H, N = phys['F'], phys['G'], phys['H'], phys['N']
+        
+        # Max shear when S11=S22=0 -> 2N*s12^2 = ref^2
+        max_shear = ref / np.sqrt(2*N)
         
         shear_ratios = [0.0, 0.4, 0.8, 0.95]
-        colors = plt.cm.viridis(np.linspace(0, 1, len(shear_ratios)))
-        theta = np.linspace(0, 2*np.pi, 360)
+        # colors = plt.cm.viridis(np.linspace(0, 1, len(shear_ratios)))
+        colors = ['purple', 'blue', 'green', 'orange']
+        
+        theta = np.linspace(0, 2*np.pi, 360).astype(np.float32)
+        c, s = np.cos(theta), np.sin(theta)
+        
+        # Pre-calc stiffness term for Benchmark
+        # Hill48: (G+H)c^2 + (F+H)s^2 - 2Hcs
+        A_bench = (G+H)*c**2 + (F+H)*s**2 - 2*H*c*s
         
         plt.figure(figsize=(7, 7))
-        # Dummy plot for legend ordering
-        plt.plot([], [], 'k:', linewidth=1.5, label='Benchmark')
-
-        max_val_plotted = 0.0
-
+        
         for i, ratio in enumerate(shear_ratios):
-            current_s12_val = ratio * max_shear
+            target_s12 = ratio * max_shear
             
-            # Generate input circle in S11-S22 plane
-            s11_in = np.cos(theta)
-            s22_in = np.sin(theta)
-            s12_in = np.full_like(theta, current_s12_val)
+            # --- A. BENCHMARK (Exact Cylindrical) ---
+            # r = sqrt( (ref^2 - 2N*s12^2) / A )
+            penalty = 2*N*target_s12**2
+            rhs = np.maximum(ref**2 - penalty, 0)
+            rad_vm = np.sqrt(rhs / (A_bench + 1e-8))
             
-            # Get predictions
-            (val_nn, _, _), (val_vm, _) = self._get_predictions(s11_in, s22_in, s12_in)
+            s11_vm = (rad_vm * c).astype(np.float64)
+            s22_vm = (rad_vm * s).astype(np.float64)
             
-            # Convert Model Output (Equivalent Stress) to Yield Radius
-            # Radius = Ref_Stress / Pred_Equiv_Stress
-            rad_nn = ref_stress / (val_nn + 1e-8)
-            rad_vm = ref_stress / (val_vm + 1e-8)
+            # --- B. NEURAL NETWORK (Iterative Cylindrical Solution) ---
+            # PROBLEM: The Neural Network is formulated in Spherical Coordinates.
+            # It takes a direction (implicitly defined by stress ratios) and returns the Total Yield Radius.
+            # However, for this plot, we need to find the In-Plane Radius 'r' at a FIXED Shear Height 's12_target'.
+            #
+            # We are solving the inverse problem:
+            # Find 'r' such that: Equivalent_Stress(r*cos(t), r*sin(t), s12_target) == Ref_Stress
+            #
+            # Since the Yield Function is monotonic (stress increases with distance from origin),
+            # we can use a Bisection Solver to find 'r' efficiently.
             
-            # Track plotting limits
-            current_max = max(rad_nn.max(), rad_vm.max())
-            if current_max > max_val_plotted: max_val_plotted = current_max
+            r_lo = np.zeros_like(theta)
+            r_hi = np.full_like(theta, ref * 2.0)
             
-            # Plot NN (Solid Color) vs Benchmark (Dotted Black)
-            plt.plot(rad_nn*s11_in, rad_nn*s22_in, color=colors[i], linewidth=2, label=f"Shear={ratio:.2f}")
-            plt.plot(rad_vm*s11_in, rad_vm*s22_in, color='k', linestyle=':', linewidth=1.5, alpha=0.6)
+            for _ in range(12):
+                r_mid = (r_lo + r_hi) / 2.0
+                inputs = np.stack([r_mid*c, r_mid*s, np.full_like(theta, target_s12)], axis=1)
+                pred = self.model(tf.constant(inputs)).numpy().flatten()
+                
+                # If pred > ref, we are outside -> radius too big -> lower ceiling
+                mask_high = pred > ref
+                r_hi = np.where(mask_high, r_mid, r_hi)
+                r_lo = np.where(mask_high, r_lo, r_mid)
+                
+            rad_nn = (r_lo + r_hi) / 2.0
+            s11_nn = (rad_nn * c).astype(np.float64)
+            s22_nn = (rad_nn * s).astype(np.float64)
+            
+            # --- PLOTTING ---
+            # Benchmark (Dotted Black)
+            lbl_bench = 'Benchmark' if i == 0 else None
+            plt.plot(s11_vm, s22_vm, 'k:', linewidth=1.5, alpha=0.8, label=lbl_bench, zorder=5)
+            
+            # NN (Colored Solid)
+            plt.plot(s11_nn, s22_nn, color=colors[i], linewidth=2, label=f"Shear={ratio:.2f}", zorder=5)
 
-        # Mark the theoretical max shear point
+        # Plot Max Shear Marker (Center)
         plt.scatter([0], [0], color='red', marker='x', s=100, label=f'Max Shear ({max_shear:.2f})', zorder=10)
         
-        limit = max_val_plotted * 1.1
+        # Simple Fixed View (Approx 1.5x Ref Stress)
+        limit = ref * 1.5
         plt.xlim(-limit, limit); plt.ylim(-limit, limit)
-        plt.axis('equal'); plt.xlabel("S11"); plt.ylabel("S22")
+        plt.gca().set_aspect('equal', adjustable='box')
+        plt.xlabel("S11"); plt.ylabel("S22")
         plt.grid(True, alpha=0.3)
-        plt.title(f"Yield Loci Slices (Ref={ref_stress})")
+        plt.title(f"Yield Loci Slices (Ref={ref})")
         plt.legend(loc='best', fontsize='small', framealpha=0.9)
         plt.tight_layout()
-        plt.savefig(os.path.join(self.plot_dir, "yield_loci_slices.png")); plt.close()
+        plt.savefig(os.path.join(self.plot_dir, "yield_loci_slices.png"))
+        plt.close()
 
     # =========================================================================
     #  CHECK 2: RADIUS VS THETA
@@ -224,8 +250,8 @@ class PhysicsChecks:
         
         # R-value formula using gradients
         d_eps_t = -(dg11 + dg22)
-        d_eps_w = dg11*sin_a**2 + dg22*cos_a**2 - 2*dg12*sin_a*cos_a
-        r_bench = (dg11*sin_a**2 + dg22*cos_a**2 - 2*dg12*sin_a*cos_a) / (-(dg11 + dg22) + 1e-8)
+        d_eps_w = dg11*sin_a**2 + dg22*cos_a**2 - dg12*sin_a*cos_a
+        r_bench = (dg11*sin_a**2 + dg22*cos_a**2 - dg12*sin_a*cos_a) / (-(dg11 + dg22) + 1e-8)
 
         # --- B. NN CALCULATIONS ---
         # 1. Find Yield Stress (Scale unit vector until Model(x) = Ref)
@@ -247,7 +273,12 @@ class PhysicsChecks:
         ds_11, ds_22, ds_12 = grads_n[:,0], grads_n[:,1], grads_n[:,2]
         
         # Calculate R-value
-        r_nn = (ds_11*sin_a**2 + ds_22*cos_a**2 - 2*ds_12*sin_a*cos_a) / (-(ds_11 + ds_22) + 1e-8)
+        r_nn = (ds_11*sin_a**2 + ds_22*cos_a**2 - ds_12*sin_a*cos_a) / (-(ds_11 + ds_22) + 1e-8)
+
+        # Print R-value comparisons for key angles
+        for angle in [0, 45, 90]:
+            idx = np.argmin(np.abs(angles - angle))
+            print(f"   [R-value] Angle {angle:>2} deg: Pred={r_nn[idx]:.4f}, Bench={r_bench[idx]:.4f}, Error={np.abs(r_nn[idx]-r_bench[idx]):.4f}")
 
         # --- PLOTTING ---
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 10), sharex=True)
@@ -309,6 +340,7 @@ class PhysicsChecks:
 
         # Reshape for contour plots
         err_se = np.nan_to_num(err_se).reshape(TT.shape)
+        print(f"   [Full Domain] Mean Rel Error: {np.mean(err_se):.2e}, Max Rel Error: {np.max(err_se):.2e}")
         err_angle_rad = np.nan_to_num(err_angle_rad).reshape(TT.shape)
         min_eigs = np.nan_to_num(min_eigs).reshape(TT.shape)
 
@@ -449,3 +481,58 @@ class PhysicsChecks:
         plt.xlabel(r"Theta ($\times \pi$)"); plt.ylabel("Min Principal Minor")
         plt.legend(loc='lower right'); plt.grid(True, alpha=0.3); plt.tight_layout()
         plt.savefig(os.path.join(self.plot_dir, "convexity_slice_1d.png")); plt.close()
+
+    def check_benchmark_derivatives(self):
+        """
+        Verifies that the Analytical Benchmark Gradients match Finite Difference approximations.
+        """
+        print("Running Benchmark Derivative Audit...")
+        
+        # 1. Generate random stress states (Float64 for test)
+        s = np.random.uniform(-2, 2, (10, 3)).astype(np.float64)
+        s11, s22, s12 = s[:,0], s[:,1], s[:,2]
+        
+        # 2. Get Analytical Gradients
+        _, (_, grad_analytical) = self._get_predictions(s11, s22, s12)
+        
+        # 3. Compute Finite Difference
+        phys = self.config.get('physics', {})
+        F, G, H, N = phys.get('F', 0.5), phys.get('G', 0.5), phys.get('H', 0.5), phys.get('N', 1.5)
+        
+        def hill48_func(s1, s2, s3):
+            val_sq = F*s2**2 + G*s1**2 + H*(s1-s2)**2 + 2*N*s3**2
+            return np.sqrt(np.maximum(val_sq, 1e-16))
+
+        epsilon = 1e-4 # Tuned for stability
+        grad_fd = np.zeros_like(grad_analytical)
+        
+        for i in range(len(s11)):
+            # d/ds11
+            v_p = hill48_func(s11[i]+epsilon, s22[i], s12[i])
+            v_m = hill48_func(s11[i]-epsilon, s22[i], s12[i])
+            grad_fd[i, 0] = (v_p - v_m) / (2*epsilon)
+            
+            # d/ds22
+            v_p = hill48_func(s11[i], s22[i]+epsilon, s12[i])
+            v_m = hill48_func(s11[i], s22[i]-epsilon, s12[i])
+            grad_fd[i, 1] = (v_p - v_m) / (2*epsilon)
+            
+            # d/ds12
+            v_p = hill48_func(s11[i], s22[i], s12[i]+epsilon)
+            v_m = hill48_func(s11[i], s22[i], s12[i]-epsilon)
+            grad_fd[i, 2] = (v_p - v_m) / (2*epsilon)
+
+        # 4. Compare
+        error = np.abs(grad_analytical - grad_fd)
+        max_error = np.max(error)
+        
+        print(f"   Max discrepancy (Analytical vs FD): {max_error:.2e}")
+        
+        if max_error < 1e-4:
+            print("   ✅ Benchmark Derivatives are consistent.")
+        else:
+            print("   ❌ Benchmark Derivatives have a BUG.")
+            # Print first failure for debugging
+            idx = np.unravel_index(np.argmax(error), error.shape)
+            print(f"      Fail at sample {idx[0]}, component {idx[1]}")
+            print(f"      Analytical: {grad_analytical[idx]:.5f}, FD: {grad_fd[idx]:.5f}")
