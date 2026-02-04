@@ -11,7 +11,7 @@ import tensorflow as tf
 
 from src.trainer import Trainer
 from src.export import Exporter
-from src.sanity_check import SanityChecker
+from src.checks import SanityChecker
 from src.data_loader import YieldDataLoader
 from src.config import Config
 from src.model import HomogeneousYieldModel 
@@ -42,9 +42,21 @@ def main():
     
     if args.resume:
         resume_path = args.resume
-        conf_path = os.path.join(resume_path, "config.yaml")
+        
+        # If resume_path is a file, we need to find the config.yaml in the parent or grandparent
+        if os.path.isfile(resume_path):
+            parent = os.path.dirname(resume_path)
+            # Check if we are inside 'checkpoints' subfolder
+            if os.path.basename(parent) == 'checkpoints':
+                base_dir = os.path.dirname(parent)
+            else:
+                base_dir = parent
+        else:
+            base_dir = resume_path
+
+        conf_path = os.path.join(base_dir, "config.yaml")
         if not os.path.exists(conf_path):
-            print(f"Error: Cannot resume. No config.yaml found in {resume_path}")
+            print(f"Error: Cannot resume. No config.yaml found in {base_dir}")
             sys.exit(1)
         config = Config.from_yaml(conf_path)
         print(f"📄 Loaded config from resume folder: {conf_path}")

@@ -57,6 +57,7 @@ class TrainingConfig:
     weights: WeightsConfig
     save_dir: str
     checkpoint_interval: int
+    overwrite: bool # Added field for directory handling
 
 @dataclass
 class Config:
@@ -108,7 +109,8 @@ class Config:
                 learning_rate=data['training']['learning_rate'],
                 save_dir=data['training']['save_dir'],
                 weights=WeightsConfig(**w_data),
-                checkpoint_interval=data['training']['checkpoint_interval']
+                checkpoint_interval=data['training']['checkpoint_interval'],
+                overwrite=data['training'].get('overwrite', False)
             )
         )
 

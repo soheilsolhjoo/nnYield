@@ -11,11 +11,11 @@ class Exporter:
         self.model = HomogeneousYieldModel(config)
         
         # Load weights
-        weights_path = os.path.join(
-            config['training']['save_dir'], 
-            config['experiment_name'], 
-            "model.weights.h5"
-        )
+        exp_dir = os.path.join(config['training']['save_dir'], config['experiment_name'])
+        weights_path = os.path.join(exp_dir, "best_model.weights.h5")
+        
+        if not os.path.exists(weights_path):
+            weights_path = os.path.join(exp_dir, "model.weights.h5")
         
         # Build model with dummy input before loading weights
         dummy = tf.constant(np.random.randn(1, 3).astype(np.float32))
