@@ -79,7 +79,7 @@ training:
   lr_scheduler:
     enabled: true
     patience: 100           # epochs of no improvement
-    factor: 0.5             # reduction multiplier
+    factor: 0.9             # reduction multiplier
     min_lr: 1.0e-6
 
   # --- STOPPING THRESHOLDS ---

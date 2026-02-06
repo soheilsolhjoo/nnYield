@@ -5,6 +5,7 @@ import pandas as pd
 from scipy.stats import qmc
 from ..model import HomogeneousYieldModel
 from ..data_loader import YieldDataLoader
+from ..config import Config
 
 class BaseChecker:
     """
@@ -23,22 +24,16 @@ class BaseChecker:
         using Sobol sequences and spherical coordinate transformations.
     """
     
-    def __init__(self, model, config, output_dir):
+    def __init__(self, model, config: Config, output_dir):
         """
         Initializes the checking environment.
         
         Args:
             model (tf.keras.Model): The trained Neural Network yield surface model.
-            config (dict or object): The configuration containing physics parameters (Hill48) 
-                                     and model settings (Ref Stress).
+            config (Config): The configuration object.
             output_dir (str): Path to the experiment output folder where plots/CSVs will be saved.
         """
-        # 1. Handle Config Format (Support both Dictionary and Object access)
-        if hasattr(config, 'to_dict'):
-            self.config = config.to_dict()
-        else:
-            self.config = config
-        
+        self.config = config
         self.model = model
         self.output_dir = output_dir
         
@@ -64,7 +59,7 @@ class BaseChecker:
         Returns:
             pd.DataFrame or None: The loaded data if file exists, else None.
         """
-        path = self.config['data'].get('experimental_csv', None)
+        path = getattr(self.config.data, 'experimental_csv', None)
         if path and os.path.exists(path):
             return pd.read_csv(path)
         return None
@@ -151,8 +146,8 @@ class BaseChecker:
         s12_64 = s12.astype(np.float64)
         
         # Load Hill48 Parameters (F, G, H, N) from config
-        phys = self.config.get('physics', {})
-        F, G, H, N = phys.get('F', 0.5), phys.get('G', 0.5), phys.get('H', 0.5), phys.get('N', 1.5)
+        phys = self.config.physics
+        F, G, H, N = phys.F, phys.G, phys.H, phys.N
         
         # A. Calculate Hill48 Equivalent Stress
         # Formula: sqrt( F*s22^2 + G*s11^2 + H*(s11-s22)^2 + 2*N*s12^2 )
@@ -223,7 +218,7 @@ class BaseChecker:
         inputs_tf = tf.constant(unit_inputs)
         pred_se = self.model(inputs_tf).numpy().flatten()
         
-        ref_stress = self.config['model']['ref_stress']
+        ref_stress = self.config.model.ref_stress
         radii = ref_stress / (pred_se + 1e-8)
         
         # 5. Scale the unit vectors

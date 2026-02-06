@@ -25,7 +25,7 @@ class Trainer:
         self.loss_fn = PhysicsLoss(config)
         
         # Initialize Data Loader
-        self.loader = YieldDataLoader(config.to_dict())
+        self.loader = YieldDataLoader(config)
         
         # --- 1. SETUP DIRECTORIES ---
         base_dir = os.path.join(config.training.save_dir, config.experiment_name)
@@ -74,7 +74,7 @@ class Trainer:
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=config.training.learning_rate)
 
         # --- 3. INITIALIZE MODEL ---
-        self.model = HomogeneousYieldModel(self.config.to_dict())
+        self.model = HomogeneousYieldModel(config)
         self.model(tf.constant(np.zeros((1, 3), dtype=np.float32)))
 
         # --- 4. LOAD CHECKPOINTS / TRANSFER ---
@@ -245,7 +245,7 @@ class Trainer:
         
     def run(self, train_dataset=None, val_dataset=None):
         if train_dataset is None:
-            self.loader = YieldDataLoader(self.config.to_dict())
+            self.loader = YieldDataLoader(self.config)
             ds_shape, ds_phys, steps = self.loader.get_dataset()
         else:
             ds_shape, ds_phys, steps = train_dataset 

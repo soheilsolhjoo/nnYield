@@ -54,9 +54,9 @@ class ReportingChecks:
         # 2. BENCHMARK CALCULATIONS (Hill48)
         # =========================================================
         # Load Physics Parameters
-        phys = self.config.get('physics', {})
-        F, G, H, N = phys.get('F', 0.5), phys.get('G', 0.5), phys.get('H', 0.5), phys.get('N', 1.5)
-        ref_stress = self.config['model']['ref_stress']
+        phys = self.config.physics
+        F, G, H, N = phys.F, phys.G, phys.H, phys.N
+        ref_stress = self.config.model.ref_stress
         
         # A. Benchmark Yield Stress
         # Hill48 Criterion: F*s22^2 + G*s11^2 + H(s11-s22)^2 + 2N*s12^2 = (Sigma_ref / Sigma)^2

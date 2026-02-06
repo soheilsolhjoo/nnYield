@@ -95,7 +95,7 @@ def main():
                 sys.exit(1)
                 
             print(f"\n=== STARTING {k_folds}-FOLD CROSS VALIDATION ===")
-            loader = YieldDataLoader(config.to_dict()) 
+            loader = YieldDataLoader(config) 
             X, y_se, y_r = loader.get_numpy_data()
             
             indices = np.arange(len(X))
@@ -157,7 +157,7 @@ def main():
             print(f"Error: Weights not found at {weights_path}. Train first.")
             sys.exit(1)
             
-        exporter = Exporter(config.to_dict()) 
+        exporter = Exporter(config) 
         exporter.export_onnx()
 
     # --- 4. CHECK LOGIC (FIXED) ---
@@ -177,7 +177,7 @@ def main():
             
         # B. Instantiate and Load Model
         print(f"   -> Initializing model from config...")
-        model = HomogeneousYieldModel(config.to_dict()) 
+        model = HomogeneousYieldModel(config) 
         
         print("   -> Building model graph...")
         dummy_input = tf.zeros((1, 3)) 

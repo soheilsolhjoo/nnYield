@@ -41,7 +41,7 @@ class DiagnosticsChecks:
         df = pd.read_csv(log_path)
         
         fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-        exp_name = self.config.get('experiment_name', 'Experiment')
+        exp_name = self.config.experiment_name
         fig.suptitle(f"Training History Breakdown: {exp_name}", fontsize=16)
 
         def plot_group(ax, title, metrics, use_log=True):
@@ -200,7 +200,7 @@ class DiagnosticsChecks:
         # We need the gradient AT the yield surface, not on the unit sphere.
         inputs_tf = tf.constant(unit_inputs)
         pred_se = self.model(inputs_tf).numpy().flatten()
-        radii = self.config['model']['ref_stress'] / (pred_se + 1e-8)
+        radii = self.config.model.ref_stress / (pred_se + 1e-8)
         
         s11 = flat_u11 * radii
         s22 = flat_u22 * radii

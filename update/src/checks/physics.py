@@ -91,9 +91,9 @@ class PhysicsChecks:
         print("Running 2D Loci Slices Check...")
         
         # 1. Setup Parameters
-        ref = self.config['model']['ref_stress']
-        phys = self.config['physics']
-        F, G, H, N = phys['F'], phys['G'], phys['H'], phys['N']
+        ref = self.config.model.ref_stress
+        phys = self.config.physics
+        F, G, H, N = phys.F, phys.G, phys.H, phys.N
         
         # Max shear when S11=S22=0 -> 2N*s12^2 = ref^2
         max_shear = ref / np.sqrt(2*N)
@@ -186,7 +186,7 @@ class PhysicsChecks:
         Output: plots/radius_vs_theta.png
         """
         print("Running Radius vs Theta Check...")
-        ref_stress = self.config['model']['ref_stress']
+        ref_stress = self.config.model.ref_stress
         theta = np.linspace(0, 2*np.pi, 360)
         s11_in = np.cos(theta); s22_in = np.sin(theta); s12_in = np.zeros_like(theta)
         
@@ -233,9 +233,9 @@ class PhysicsChecks:
         u11 = cos_a**2; u22 = sin_a**2; u12 = sin_a * cos_a
         inputs_unit = np.stack([u11, u22, u12], axis=1).astype(np.float32)
 
-        phys = self.config['physics']
-        F, G, H, N = phys['F'], phys['G'], phys['H'], phys['N']
-        ref_stress = self.config['model']['ref_stress']
+        phys = self.config.physics
+        F, G, H, N = phys.F, phys.G, phys.H, phys.N
+        ref_stress = self.config.model.ref_stress
 
         # --- A. BENCHMARK CALCULATIONS (Analytical) ---
         term = F*u22**2 + G*u11**2 + H*(u11-u22)**2 + 2*N*u12**2
@@ -319,7 +319,7 @@ class PhysicsChecks:
         
         # Scale to Yield Surface
         pred_se = self.model(tf.constant(flat_u)).numpy().flatten()
-        radii = self.config['model']['ref_stress'] / (pred_se + 1e-8)
+        radii = self.config.model.ref_stress / (pred_se + 1e-8)
         s_surf = flat_u * radii[:, None]
         
         # Compute NN and Benchmark
@@ -385,7 +385,7 @@ class PhysicsChecks:
         2. **Binary Stability Map**: A black/white map of the full domain showing exactly 
            where convexity is violated (0=Unstable, 1=Stable).
         """
-        threshold = self.config['training']['convexity_threshold']
+        threshold = self.config.training.stopping_criteria.convexity_threshold
         threshold = -1.0 * abs(threshold) # Ensure it's negative
         print(f"Running Convexity Analysis (Threshold: {threshold:.1e})...")
         
@@ -426,7 +426,7 @@ class PhysicsChecks:
         
         inputs_tf = tf.constant(flat_u)
         pred_se = self.model(inputs_tf).numpy().flatten()
-        surface_points = flat_u * (self.config['model']['ref_stress'] / (pred_se + 1e-8))[:, None]
+        surface_points = flat_u * (self.config.model.ref_stress / (pred_se + 1e-8))[:, None]
         
         H_grid = self._get_hessian_autodiff(surface_points)
         grid_minors = self._get_principal_minors_numpy(H_grid).reshape(TT.shape)
@@ -462,7 +462,7 @@ class PhysicsChecks:
         
         inputs_tf = tf.constant(unit_inputs)
         pred_se = self.model(inputs_tf).numpy().flatten()
-        points = unit_inputs * (self.config['model']['ref_stress'] / (pred_se + 1e-8))[:, None]
+        points = unit_inputs * (self.config.model.ref_stress / (pred_se + 1e-8))[:, None]
         
         H = self._get_hessian_autodiff(points)
         min_minor = self._get_principal_minors_numpy(H)
