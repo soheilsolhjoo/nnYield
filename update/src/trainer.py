@@ -24,6 +24,9 @@ class Trainer:
         # Initialize Loss Function
         self.loss_fn = PhysicsLoss(config)
         
+        # Initialize Data Loader
+        self.loader = YieldDataLoader(config.to_dict())
+        
         # --- 1. SETUP DIRECTORIES ---
         base_dir = os.path.join(config.training.save_dir, config.experiment_name)
         if fold_idx is not None:
@@ -116,18 +119,44 @@ class Trainer:
                     yaml.dump(self.config.to_dict(), f, sort_keys=False)
 
         # --- 6. LOGGING ---
-        self.use_symmetry = config.data.symmetry
+        self.use_positive_shear = config.data.positive_shear
         w = config.training.weights
         print(f"Active Losses -> Stress: {w.stress>0}, R-value: {w.r_value>0}, "
-              f"Batch Convexity: {w.batch_convexity>0}, Symmetry: {w.symmetry>0}", flush=True)
+              f"Batch Convexity: {w.batch_convexity>0}, Orthotropy: {w.orthotropy>0}", flush=True)
+
+    def validate_on_path(self):
+        """
+        Runs validation on the full physics path (Uniaxial).
+        Uses the deterministic physics stream from the loader.
+        """
+        # Fetch fresh physics data (Dense/Full set)
+        _, physics_data = self.loader._generate_raw_data(needs_physics=True)
+        # Unpack 5 items (mask is not needed for global MAE check)
+        inputs_physics, target_stress_physics, target_r_values, geometry_physics, _ = physics_data
+        
+        if len(inputs_physics) == 0: 
+            return 0.0, 0.0
+
+        inputs_physics = tf.convert_to_tensor(inputs_physics)
+        target_stress_physics = tf.convert_to_tensor(target_stress_physics)
+        target_r_values = tf.convert_to_tensor(target_r_values)
+        geometry_physics = tf.convert_to_tensor(geometry_physics)
+        
+        targets = (target_stress_physics, target_r_values)
+
+        mae_stress, mae_r = self.loss_fn.validate_r_values(
+            self.model, inputs_physics, targets, geometry_physics
+        )
+        
+        return mae_stress, mae_r
 
     @tf.function
-    def train_step_dual(self, batch_shape, batch_phys, do_dyn_conv, do_symmetry):
+    def train_step_dual(self, batch_shape, batch_phys, do_dyn_conv, do_orthotropy):
         with tf.GradientTape() as tape_outer:
             with tf.GradientTape() as tape_inner:
                 loss_res = self.loss_fn.calculate_losses(
                     self.model, batch_shape, batch_phys, 
-                    do_dyn_conv, do_symmetry, mode='dual'
+                    do_dyn_conv, do_orthotropy, mode='dual'
                 )
                 primary_loss = loss_res['primary_loss']
             
@@ -149,23 +178,23 @@ class Trainer:
         
         return {
             'loss_total': primary_loss, 
-            'loss_es': loss_res['l_se'], 
-            'loss_r': loss_res['l_r'], 
-            'loss_batch_conv': loss_res['l_conv'], 
-            'loss_dyn_conv': loss_res['l_dyn'], 
-            'loss_sym': loss_res['l_sym'], 
+            'loss_stress': loss_res['loss_stress'], 
+            'loss_r': loss_res['loss_r'], 
+            'loss_batch_conv': loss_res['loss_batch_conv'], 
+            'loss_dyn_conv': loss_res['loss_dyn_conv'], 
+            'loss_ortho': loss_res['loss_ortho'], 
             'gnorm_penalty': gnorm_val,
-            'min_eig_batch': loss_res['min_stat'], 
-            'min_eig_dyn': loss_res['min_dyn']
+            'min_eig_batch': loss_res['min_eig_batch'], 
+            'min_eig_dyn': loss_res['min_eig_dyn']
         }
     
     @tf.function
-    def train_step_shape(self, batch_shape, do_dyn_conv, do_symmetry):
+    def train_step_shape(self, batch_shape, do_dyn_conv, do_orthotropy):
         with tf.GradientTape() as tape_outer:
             with tf.GradientTape() as tape_inner:
                 loss_res = self.loss_fn.calculate_losses(
                     self.model, batch_shape, None, 
-                    do_dyn_conv, do_symmetry, mode='shape'
+                    do_dyn_conv, do_orthotropy, mode='shape'
                 )
                 primary_loss = loss_res['primary_loss']
 
@@ -187,11 +216,11 @@ class Trainer:
         
         return {
             'loss_total': primary_loss, 
-            'loss_es': loss_res['l_se'], 
+            'loss_stress': loss_res['loss_stress'], 
             'loss_r': 0.0, 
             'loss_batch_conv': loss_res['l_conv'], 
             'loss_dyn_conv': loss_res['l_dyn'], 
-            'loss_sym': loss_res['l_sym'], 
+            'loss_ortho': loss_res['loss_ortho'], 
             'gnorm_penalty': gnorm_val,
             'min_eig_batch': loss_res['min_stat'], 
             'min_eig_dyn': loss_res['min_dyn']
@@ -204,14 +233,14 @@ class Trainer:
             False, False, mode='dual'
         )
         return {
-            'loss_es': loss_res['l_se'], 
+            'loss_stress': loss_res['loss_stress'], 
             'loss_r': loss_res['l_r']
         }
         
     def run(self, train_dataset=None, val_dataset=None):
         if train_dataset is None:
-            loader = YieldDataLoader(self.config.to_dict())
-            ds_shape, ds_phys, steps = loader.get_dataset()
+            self.loader = YieldDataLoader(self.config.to_dict())
+            ds_shape, ds_phys, steps = self.loader.get_dataset()
         else:
             ds_shape, ds_phys, steps = train_dataset 
             
@@ -219,7 +248,7 @@ class Trainer:
         
         n_uni = self.config.data.samples.get('uniaxial', 0)
         w_r = self.config.training.weights.r_value
-        ani_config = self.config.anisotropy_ratio
+        ani_config = self.config.anisotropy
         
         use_dual_stream = (n_uni > 0) and (w_r > 0) and (ani_config.batch_r_fraction > 0) and ani_config.enabled
 
@@ -233,8 +262,8 @@ class Trainer:
             print("🚀 Mode: SHAPE ONLY", flush=True)
 
         conf_dyn = self.config.dynamic_convexity
-        conf_sym = self.config.symmetry
-        conf_ani = self.config.anisotropy_ratio
+        conf_ortho = self.config.orthotropy
+        conf_ani = self.config.anisotropy
         w = self.config.training.weights
         
         stop_loss = self.config.training.loss_threshold
@@ -245,46 +274,71 @@ class Trainer:
         global_step = self.start_epoch * steps 
         best_metric = float('inf')
         
+        # Track last known validation for stopping logic
+        last_val_r = self.history[-1].get('val_loss_r', float('inf')) if self.history else float('inf')
+        # Filter out Nones from history for initialization if they exist
+        if last_val_r is None:
+            # Look back further if needed
+            for h in reversed(self.history):
+                if h.get('val_loss_r') is not None:
+                    last_val_r = h['val_loss_r']
+                    break
+            if last_val_r is None: last_val_r = float('inf')
+
         session_start = time.time()
         previous_time = self.history[-1].get('time', 0.0) if self.history else 0.0
 
+        # Track initial weight for ramping
+        original_w_r = self.config.training.weights.r_value
+        r_warmup_epochs = self.config.training.r_warmup
+
+        # --- TRAINING LOOP ---
         for epoch in range(self.start_epoch + 1, self.config.training.epochs + 1):
+            # 1. Linear Warmup Calculation (R-value Weight)
+            if r_warmup_epochs > 0 and epoch <= r_warmup_epochs:
+                current_w_r = original_w_r * (epoch / r_warmup_epochs)
+            else:
+                current_w_r = original_w_r
+            
+            # Inject dynamic weight into config (shared with self.loss_fn)
+            self.config.training.weights.r_value = current_w_r
+
             metric_keys = [
-                'loss_total', 'loss_es', 'loss_r', 'loss_batch_conv', 
-                'loss_dyn_conv', 'loss_sym', 'gnorm_penalty', 'min_eig_batch', 'min_eig_dyn'
+                'loss_total', 'loss_stress', 'loss_r', 'loss_batch_conv', 
+                'loss_dyn_conv', 'loss_ortho', 'gnorm_penalty', 'min_eig_batch', 'min_eig_dyn'
             ]
             train_metrics = {k: tf.keras.metrics.Mean() for k in metric_keys}
                             
             for batch_data in dataset:
                 do_dyn_conv = (conf_dyn.enabled and w.dynamic_convexity > 0) and \
                               (conf_dyn.interval == 0 or global_step % conf_dyn.interval == 0)
-                do_symmetry = (conf_sym.enabled and w.symmetry > 0) and \
-                              (conf_sym.interval == 0 or global_step % conf_sym.interval == 0)
-                run_r_step_now = (conf_ani.interval == 0) or (global_step % conf_ani.interval == 0)
-
+                do_orthotropy = (conf_ortho.enabled and w.orthotropy > 0) and \
+                              (conf_ortho.interval == 0 or global_step % conf_ortho.interval == 0)
+                
+                # Always use dual step if mode is dual; weight controls the influence
                 if mode == 'dual':
-                    if run_r_step_now:
-                        step_res = self.train_step_dual(batch_data[0], batch_data[1], do_dyn_conv, do_symmetry)
-                    else:
-                        step_res = self.train_step_shape(batch_data[0], do_dyn_conv, do_symmetry)
+                    step_res = self.train_step_dual(batch_data[0], batch_data[1], do_dyn_conv, do_orthotropy)
                 else:
-                    step_res = self.train_step_shape(batch_data, do_dyn_conv, do_symmetry)
+                    step_res = self.train_step_shape(batch_data, do_dyn_conv, do_orthotropy)
                     
                 for k, v in step_res.items():
                     if k in train_metrics: train_metrics[k].update_state(v)
                 global_step += 1
             
-            val_loss_es, val_loss_r = 0.0, 0.0
-            if val_dataset is not None:
-                val_metrics_es = tf.keras.metrics.Mean()
-                val_metrics_r = tf.keras.metrics.Mean()
-                for v_batch in val_dataset:
-                    v_res = self.val_step(v_batch[0], v_batch[1])
-                    val_metrics_es.update_state(v_res['loss_es'])
-                    val_metrics_r.update_state(v_res['loss_r'])
-                val_loss_es = float(val_metrics_es.result())
-                val_loss_r = float(val_metrics_r.result())
+            # --- 2. PERIODIC FULL-PATH VALIDATION ---
+            if conf_ani.interval > 0:
+                run_val_now = (epoch % conf_ani.interval == 0)
+            else:
+                run_val_now = False
+            
+            # Use None for history to keep plots clean (dots only)
+            current_val_r = None
+            # Always validate if enabled (helps visualize warmup progress)
+            if conf_ani.enabled and (run_val_now or epoch == 1 or epoch == self.config.training.epochs):
+                _, current_val_r = self.validate_on_path()
+                last_val_r = current_val_r # Update persistent tracker for stopping logic
 
+            # 2. Construct Row
             current_elapsed = time.time() - session_start
             row = {
                 'epoch': epoch, 
@@ -292,14 +346,16 @@ class Trainer:
                 'learning_rate': float(self.optimizer.learning_rate.numpy())
             }
             for k, v in train_metrics.items(): row[f"train_{k}"] = float(v.result().numpy())
-            row['val_loss_es'] = val_loss_es
-            row['val_loss_r'] = val_loss_r
+            
+            # Log only the fresh value (or None)
+            row['val_loss_r'] = current_val_r
             
             self.history.append(row)
             
-            if epoch % 5 == 0 or epoch == 1:
+            # 3. Print Progress (Showing last known validation)
+            if epoch % self.config.training.print_interval == 0 or epoch == 1:
                 log_str = (f"Ep {epoch}: Loss {row['train_loss_total']:.5f} | "
-                           f"ES: {row['train_loss_es']:.5f} | R: {row['train_loss_r']:.5f} | "
+                           f"Stress: {row['train_loss_stress']:.5f} | R(Val): {last_val_r:.5f} | "
                            f"MinEig(B/D): {row['train_min_eig_batch']:.1e} / {row['train_min_eig_dyn']:.1e} | "
                            f"G: {row['train_gnorm_penalty']:.5f}")
                 print(log_str, flush=True)
@@ -314,7 +370,9 @@ class Trainer:
             if ckpt_interval > 0 and epoch % ckpt_interval == 0:
                 self.checkpoint_manager.save(epoch, self.model, self.optimizer, self.config, self.history, is_best=False)
 
+            # --- 4-WAY STOPPING CONDITION ---
             pass_loss = (stop_loss is None) or (row['train_loss_total'] <= stop_loss)
+            
             pass_conv = True
             if stop_conv is not None:
                 target_min = -1.0 * abs(stop_conv) 
@@ -323,7 +381,9 @@ class Trainer:
                 pass_conv = stat_ok and dyn_ok
 
             pass_gnorm = (stop_gnorm is None) or (row['train_gnorm_penalty'] <= stop_gnorm)
-            pass_r = (not (stop_r is not None and w.r_value > 0)) or (row['train_loss_r'] <= stop_r)
+            
+            # Use last_val_r for persistent check
+            pass_r = (not (stop_r is not None and w.r_value > 0 and conf_ani.enabled)) or (last_val_r <= stop_r)
 
             any_limit_set = (stop_loss or stop_conv or stop_gnorm or stop_r)
             if any_limit_set and pass_loss and pass_conv and pass_gnorm and pass_r:

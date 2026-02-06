@@ -76,9 +76,9 @@ class DiagnosticsChecks:
         ])
 
         # 2. STRESS ACCURACY (Top-Center)
-        plot_group(axes[0, 1], "Stress Accuracy (ES)", [
-            ("Train ES", 'train_loss_es', 'blue'),
-            ("Val ES", 'val_loss_es', 'cyan')
+        plot_group(axes[0, 1], "Stress Accuracy (Stress)", [
+            ("Train Stress", 'train_loss_stress', 'blue'),
+            ("Val Stress", 'val_loss_stress', 'cyan')
         ])
 
         # 3. ANISOTROPY ACCURACY (Top-Right)

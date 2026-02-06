@@ -5,7 +5,7 @@ from typing import List, Optional
 @dataclass
 class DataConfig:
     type: str
-    symmetry: bool
+    positive_shear: bool
     samples: dict 
     input_range: List[float]
 
@@ -41,7 +41,7 @@ class WeightsConfig:
     r_value: float
     batch_convexity: float
     dynamic_convexity: float
-    symmetry: float
+    orthotropy: float
     gnorm_penalty: float
 
 @dataclass
@@ -57,6 +57,8 @@ class TrainingConfig:
     weights: WeightsConfig
     save_dir: str
     checkpoint_interval: int
+    print_interval: int
+    r_warmup: int
     overwrite: bool # Added field for directory handling
 
 @dataclass
@@ -64,8 +66,8 @@ class Config:
     experiment_name: str
     data: DataConfig
     dynamic_convexity: CheckConfig
-    symmetry: CheckConfig
-    anisotropy_ratio: AnisotropyConfig
+    orthotropy: CheckConfig
+    anisotropy: AnisotropyConfig
     model: ModelConfig
     physics: PhysicsConfig
     training: TrainingConfig
@@ -78,19 +80,12 @@ class Config:
 
     @classmethod
     def from_dict(cls, data: dict):
-        # Backward Compatibility for Weights
-        w_data = data['training']['weights'].copy()
-        if 'convexity' in w_data:
-            w_data['batch_convexity'] = w_data.pop('convexity')
-        if 'gradient_norm' in w_data:
-            w_data['gnorm_penalty'] = w_data.pop('gradient_norm')
-
         return cls(
             experiment_name=data['experiment_name'],
             data=DataConfig(**data['data']),
             dynamic_convexity=CheckConfig(**data['dynamic_convexity']),
-            symmetry=CheckConfig(**data['symmetry']),
-            anisotropy_ratio=AnisotropyConfig(**data['anisotropy_ratio']),
+            orthotropy=CheckConfig(**data['orthotropy']),
+            anisotropy=AnisotropyConfig(**data['anisotropy']),
             model=ModelConfig(
                 hidden_layers=data['model']['hidden_layers'],
                 activation=data['model']['activation'],
@@ -108,8 +103,10 @@ class Config:
                 batch_size=data['training']['batch_size'],
                 learning_rate=data['training']['learning_rate'],
                 save_dir=data['training']['save_dir'],
-                weights=WeightsConfig(**w_data),
+                weights=WeightsConfig(**data['training']['weights']),
                 checkpoint_interval=data['training']['checkpoint_interval'],
+                print_interval=data['training']['print_interval'],
+                r_warmup=data['training'].get('r_warmup', 0),
                 overwrite=data['training'].get('overwrite', False)
             )
         )

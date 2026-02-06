@@ -16,9 +16,9 @@ class YieldDataLoader:
         # FIX: w_r is in training -> weights
         w_r = self.config['training']['weights'].get('r_value', 0.0)
         
-        # FIX: batch_r_fraction is now in 'anisotropy_ratio', NOT 'training'
+        # FIX: batch_r_fraction is now in 'anisotropy', NOT 'training'
         # We use .get() for safety, but expect the key to exist based on new config
-        ani_config = self.config.get('anisotropy_ratio', {})
+        ani_config = self.config.get('anisotropy', {})
         batch_r_frac = ani_config.get('batch_r_fraction', 0.0)
         is_enabled = ani_config.get('enabled', False)
         
@@ -91,7 +91,7 @@ class YieldDataLoader:
         # C-coefficients kept for Shape Data (Loci) generation
         C11, C22, C12, C66 = G+H, F+H, -2*H, 2*N
         
-        use_symmetry = self.config['data'].get('symmetry', True)
+        use_positive_shear = self.config['data'].get('positive_shear', True)
 
         # --- 1. SHAPE DATA (Random Loci) ---
         if n_gen > 0:
@@ -99,7 +99,7 @@ class YieldDataLoader:
             sample = sampler.random(n_gen)
             max_shear = ref_stress / np.sqrt(C66)
             
-            if use_symmetry:
+            if use_positive_shear:
                 s12_g = (sample[:, 0] * max_shear).astype(np.float32)
             else:
                 s12_g = ((sample[:, 0] * 2.0 - 1.0) * max_shear).astype(np.float32)
@@ -137,10 +137,10 @@ class YieldDataLoader:
         
         # --- 2. PHYSICS DATA ---
         if n_uni > 0:
-            sampler_uni = qmc.Sobol(d=1, scramble=True)
-            sample_uni = sampler_uni.random(n_uni)
+            # Use Linspace for strict equidistance
+            limit = np.pi / 2.0 if use_positive_shear else 2.0 * np.pi
+            alpha_uni = np.linspace(0, limit, n_uni, endpoint=True, dtype=np.float32)
             
-            alpha_uni = (sample_uni[:, 0] * np.pi / (2.0 if use_symmetry else 1.0)).astype(np.float32)
             sin_a, cos_a = np.sin(alpha_uni), np.cos(alpha_uni)
             
             # Unit vector components
@@ -162,7 +162,8 @@ class YieldDataLoader:
             g12 = (2*N*s12) / denom
             
             d_eps_t = -(g11 + g22)
-            d_eps_w = g11*sin_a**2 + g22*cos_a**2 - 2*g12*sin_a*cos_a
+            # REMOVED factor of 2 from g12 term
+            d_eps_w = g11*sin_a**2 + g22*cos_a**2 - g12*sin_a*cos_a
             r_calc = d_eps_w / (d_eps_t + 1e-8)
             
             valid = (np.abs(r_calc) < 20.0) & (np.abs(d_eps_t) > 1e-6)
@@ -173,16 +174,16 @@ class YieldDataLoader:
                 r_vals = r_calc[valid][:, None]
                 geo_uni = np.stack([sin_a**2, cos_a**2, sin_a*cos_a], axis=1)[valid]
                 mask_uni = np.ones((len(se_uni), 1), dtype=np.float32)
-                # UPDATED: Add Stress Target (Identical to se_uni for synthetic data)
-                stress_target = se_uni 
+                # # UPDATED: Add Stress Target (Identical to se_uni for synthetic data)
+                # stress_target = se_uni 
             else:
-                inputs_uni, se_uni, r_vals, geo_uni, mask_uni, stress_target = [np.array([]) for _ in range(6)]
+                inputs_uni, se_uni, r_vals, geo_uni, mask_uni = [np.array([]) for _ in range(5)]
         else:
             inputs_uni = np.zeros((0, 3), dtype=np.float32)
             # UPDATED: Create 6 empty arrays
-            se_uni, r_vals, mask_uni, stress_target = [np.zeros((0, 1), dtype=np.float32) for _ in range(4)]
+            se_uni, r_vals, mask_uni = [np.zeros((0, 1), dtype=np.float32) for _ in range(3)]
             geo_uni = np.zeros((0, 3), dtype=np.float32)
 
         # UPDATED: Return 6 items
-        data_phys = (inputs_uni, se_uni, r_vals, geo_uni, mask_uni, stress_target)
+        data_phys = (inputs_uni, se_uni, r_vals, geo_uni, mask_uni)
         return data_shape, data_phys

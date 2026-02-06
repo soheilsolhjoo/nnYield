@@ -2,25 +2,25 @@ experiment_name: "von_mises_benchmark"
 
 data:
   type: "synthetic"   # Options: synthetic, csv
-  symmetry: true      # Set to true to enforce s12>=0, false for full range
+  positive_shear: true      # Set to true to enforce s12>=0, false for full range
   samples:
     loci: 200         # For shape/convexity (Mask=0)
     uniaxial: 10     # For R-values (Mask=1)
   input_range: [-1.0, 1.0]
 
 dynamic_convexity:
-  enabled: false
+  enabled: true
   samples: 1000        # How many random points to probe per step
-  interval: 100       # Run dynamic check every N steps (0 = every step)
+  interval: 10       # Run dynamic check every N steps (0 = every step)
 
-symmetry:
-  enabled: false
+orthotropy:
+  enabled: true
   samples: 100        # Number of equator points
-  interval: 100       # Run every N steps (0 = every step)
+  interval: 10       # Run every N steps (0 = every step)
 
-anisotropy_ratio:
+anisotropy:
   # This decides if we go for dual stream of single one
-  enabled: false         # Enable R-value data loss
+  enabled: true         # Enable R-value data loss
   batch_r_fraction: 0.2  # Fraction of batch for R-value data
   interval: 10           # Run every N steps (0 = every step)
 
@@ -44,11 +44,16 @@ physics:  # synthetic Hill48 parameters
   
 training:
   k_folds: 1
-  epochs: 100000
+  epochs: 30
   batch_size: 16
   learning_rate: 0.001
   save_dir: "outputs"
   checkpoint_interval: 100
+  
+  print_interval: 25
+  # overwrite: true
+
+  r_warmup: 200
 
   # --- STOPPING SWITCHES ---
   # Training stops ONLY when ALL enabled thresholds are met.
@@ -66,6 +71,6 @@ training:
     r_value: 5.0          # Weight for R-value data
     batch_convexity: 1.0       # Weight for static data convexity
     dynamic_convexity: 1.0 # Weight for dynamic self-consistent convexity
-    symmetry: 0.1        # Penalty for non-zero shear slope at equator
+    orthotropy: 0.1        # Penalty for non-zero shear slope at equator
     gnorm_penalty: 1.0   # Penalizes the magnitude of weight updates to ensure training stability and smooth loss landscapes.
     
