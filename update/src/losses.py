@@ -180,12 +180,12 @@ class PhysicsLoss:
             loss_batch_conv, min_eig_batch = self.compute_convexity_loss(model, inp_s)
         
         if do_dyn_conv and getattr(w, 'dynamic_convexity', 0) > 0:
-            n_dyn = self._get_config_attr('dynamic_convexity.samples')
+            n_dyn = self._get_config_attr('physics_constraints.dynamic_convexity.samples')
             inp_dyn = self.sample_dynamic_surface(model, n_dyn, force_equator=False)
             loss_dyn_conv, min_eig_dyn = self.compute_convexity_loss(model, inp_dyn)
 
         if do_orthotropy and getattr(w, 'orthotropy', 0) > 0:
-            n_sym = self._get_config_attr('orthotropy.samples')
+            n_sym = self._get_config_attr('physics_constraints.orthotropy.samples')
             inp_sym = self.sample_dynamic_surface(model, n_sym, force_equator=True)
             with tf.GradientTape() as tape_sym:
                 tape_sym.watch(inp_sym)
@@ -195,7 +195,7 @@ class PhysicsLoss:
             loss_ortho = tf.reduce_mean(tf.square(grads_sym[:, 2]))
 
         # 4. Stress Combination
-        r_frac = self._get_config_attr('anisotropy.batch_r_fraction') if mode == 'dual' else 0.0
+        r_frac = self._get_config_attr('physics_constraints.anisotropy.batch_r_fraction') if mode == 'dual' else 0.0
         loss_stress = (loss_stress_loci * (1.0 - r_frac)) + (loss_stress_uni * r_frac)
         
         primary_loss = (getattr(w, 'stress', 1.0) * loss_stress) + \

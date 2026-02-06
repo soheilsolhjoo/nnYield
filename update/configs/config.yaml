@@ -1,37 +1,24 @@
+# =============================================================================
+# HIGH-LEVEL SETTINGS
+# =============================================================================
 experiment_name: "von_mises_benchmark"
 
+# =============================================================================
+# DATA PIPELINE
+# =============================================================================
 data:
-  type: "synthetic"   # Options: synthetic, csv
-  positive_shear: true      # Set to true to enforce s12>=0, false for full range
-  samples:
-    loci: 200         # For shape/convexity (Mask=0)
-    uniaxial: 10     # For R-values (Mask=1)
+  type: "synthetic"         # options: synthetic, csv
+  positive_shear: true      # true: s12 >= 0 | false: full range [-max, max]
   input_range: [-1.0, 1.0]
+  samples:
+    loci: 200               # Random points for overall shape (Mask=0)
+    uniaxial: 10            # Tension points for R-values (Mask=1)
 
-dynamic_convexity:
-  enabled: true
-  samples: 1000        # How many random points to probe per step
-  interval: 10       # Run dynamic check every N steps (0 = every step)
-
-orthotropy:
-  enabled: true
-  samples: 100        # Number of equator points
-  interval: 10       # Run every N steps (0 = every step)
-
-anisotropy:
-  # This decides if we go for dual stream of single one
-  enabled: true         # Enable R-value data loss
-  batch_r_fraction: 0.2  # Fraction of batch for R-value data
-  interval: 10           # Run every N steps (0 = every step)
-
-model:
-  hidden_layers: [8, 8, 8, 8]  # Number of neurons per hidden layer
-  activation: "softplus" # Must be smooth (no ReLU)
-  ref_stress: 1.0
-  use_icnn_constraints: false # Enforce ICNN constraints for convexity
-
-physics:  # synthetic Hill48 parameters
-  # This set corresponds to a von Mises model
+# =============================================================================
+# PHYSICS & CONSTRAINTS (The Material Model)
+# =============================================================================
+physics:
+  # synthetic Hill48 parameters (Hill 1948)
   F: 0.5
   G: 0.5
   H: 0.5
@@ -41,36 +28,78 @@ physics:  # synthetic Hill48 parameters
   # G: 3.8
   # H: 1.55
   # N: 3.25
+
+physics_constraints:
+  anisotropy:
+    enabled: true
+    batch_r_fraction: 0.2   # percentage of batch dedicated to R-values
+    interval: 10            # validate full path every N epochs
   
+  orthotropy:
+    enabled: true
+    samples: 100            # number of equator points to probe
+    interval: 10            # run penalty every N steps
+    
+  dynamic_convexity:
+    enabled: true
+    samples: 1000           # points probed across full surface
+    interval: 10            # run penalty every N steps
+
+# =============================================================================
+# MODEL ARCHITECTURE
+# =============================================================================
+model:
+  hidden_layers: [8, 8, 8, 8]
+  activation: "softplus"    # smooth activation required for Hessian
+  ref_stress: 1.0
+  use_icnn_constraints: false
+
+# =============================================================================
+# TRAINING ENGINE
+# =============================================================================
 training:
-  k_folds: 1
+  # Basic Loop
   epochs: 30
   batch_size: 16
   learning_rate: 0.001
+  k_folds: 1
+  
+  # Logging & Persistence
   save_dir: "outputs"
   checkpoint_interval: 100
-  
   print_interval: 25
-  # overwrite: true
+  overwrite: true
 
-  r_warmup: 200
+  # Curriculum Learning (Linear Weight Ramping)
+  curriculum:
+    r_warmup: 200           # Epochs to ramp anisotropy weight
+    convexity_warmup: 500   # Epochs to ramp convexity weights
 
-  # --- STOPPING SWITCHES ---
-  # Training stops ONLY when ALL enabled thresholds are met.
-  # Set to null (or remove) to disable specific checks.
-  loss_threshold: 0.01       # Main Stop: Total Loss (Stress + others)
-  gnorm_threshold: 0.01        # Stability: Max allowed gradient norm | NOTE: There is no weight-loss directly connected to this switch.
-  r_threshold: 0.01            # Accuracy: Max allowed R-value error (approx 5%)
-  # convexity_threshold: Target for PHYSICAL MIN EIGENVALUE
-  # Set this to the "Maximum Allowed Dent Depth".
-  # Example: 2.0e-4 means "Stop only if Min Eigenvalue >= -0.0002"
-  convexity_threshold: 2.0e-4
+  # Dynamic Learning Rate
+  lr_scheduler:
+    enabled: true
+    patience: 100           # epochs of no improvement
+    factor: 0.5             # reduction multiplier
+    min_lr: 1.0e-6
 
+  # --- STOPPING THRESHOLDS ---
+  # Training stops only when ALL enabled conditions are met.
+  stopping_criteria:
+    loss_threshold: 0.01       # Total objective
+    r_threshold: 0.01          # Mean R-value error
+    convexity_threshold: 2.0e-4 # Target for Min Eigenvalue
+    gnorm_threshold: 0.01      # Stability (gradient norm)
+
+  # --- LOSS WEIGHTS ---
   weights:
+    # 1. Primary Accuracy
     stress: 1.0
-    r_value: 5.0          # Weight for R-value data
-    batch_convexity: 1.0       # Weight for static data convexity
-    dynamic_convexity: 1.0 # Weight for dynamic self-consistent convexity
-    orthotropy: 0.1        # Penalty for non-zero shear slope at equator
-    gnorm_penalty: 1.0   # Penalizes the magnitude of weight updates to ensure training stability and smooth loss landscapes.
+    r_value: 5.0
     
+    # 2. Curvature & Symmetry
+    batch_convexity: 1.0
+    dynamic_convexity: 1.0
+    orthotropy: 0.1
+    
+    # 3. Numerical Health
+    gnorm_penalty: 1.0

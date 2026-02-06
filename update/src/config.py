@@ -2,6 +2,10 @@ import yaml
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional
 
+# =============================================================================
+# NESTED CONFIGURATIONS
+# =============================================================================
+
 @dataclass
 class DataConfig:
     type: str
@@ -20,6 +24,31 @@ class AnisotropyConfig:
     enabled: bool
     batch_r_fraction: float
     interval: int
+
+@dataclass
+class PhysicsConstraintsConfig:
+    anisotropy: AnisotropyConfig
+    orthotropy: CheckConfig
+    dynamic_convexity: CheckConfig
+
+@dataclass
+class LRSchedulerConfig:
+    enabled: bool
+    patience: int
+    factor: float
+    min_lr: float
+
+@dataclass
+class CurriculumConfig:
+    r_warmup: int
+    convexity_warmup: int
+
+@dataclass
+class StoppingCriteriaConfig:
+    loss_threshold: float
+    r_threshold: float
+    convexity_threshold: float
+    gnorm_threshold: float
 
 @dataclass
 class ModelConfig:
@@ -46,30 +75,30 @@ class WeightsConfig:
 
 @dataclass
 class TrainingConfig:
-    k_folds: int
     epochs: int
-    loss_threshold: float
-    convexity_threshold: float  # Safety Net
-    gnorm_threshold: float      # Stability
-    r_threshold: float          # Physics Accuracy
     batch_size: int
     learning_rate: float
-    weights: WeightsConfig
+    k_folds: int
     save_dir: str
     checkpoint_interval: int
     print_interval: int
-    r_warmup: int
-    overwrite: bool # Added field for directory handling
+    overwrite: bool
+    curriculum: CurriculumConfig
+    lr_scheduler: LRSchedulerConfig
+    stopping_criteria: StoppingCriteriaConfig
+    weights: WeightsConfig
+
+# =============================================================================
+# MAIN CONFIG
+# =============================================================================
 
 @dataclass
 class Config:
     experiment_name: str
     data: DataConfig
-    dynamic_convexity: CheckConfig
-    orthotropy: CheckConfig
-    anisotropy: AnisotropyConfig
-    model: ModelConfig
     physics: PhysicsConfig
+    physics_constraints: PhysicsConstraintsConfig
+    model: ModelConfig
     training: TrainingConfig
 
     @classmethod
@@ -83,31 +112,26 @@ class Config:
         return cls(
             experiment_name=data['experiment_name'],
             data=DataConfig(**data['data']),
-            dynamic_convexity=CheckConfig(**data['dynamic_convexity']),
-            orthotropy=CheckConfig(**data['orthotropy']),
-            anisotropy=AnisotropyConfig(**data['anisotropy']),
-            model=ModelConfig(
-                hidden_layers=data['model']['hidden_layers'],
-                activation=data['model']['activation'],
-                ref_stress=data['model']['ref_stress'],
-                use_icnn_constraints=data['model']['use_icnn_constraints']
-            ),
             physics=PhysicsConfig(**data['physics']),
+            physics_constraints=PhysicsConstraintsConfig(
+                anisotropy=AnisotropyConfig(**data['physics_constraints']['anisotropy']),
+                orthotropy=CheckConfig(**data['physics_constraints']['orthotropy']),
+                dynamic_convexity=CheckConfig(**data['physics_constraints']['dynamic_convexity'])
+            ),
+            model=ModelConfig(**data['model']),
             training=TrainingConfig(
-                k_folds=data['training']['k_folds'],
                 epochs=data['training']['epochs'],
-                loss_threshold=data['training']['loss_threshold'],
-                convexity_threshold=data['training']['convexity_threshold'],
-                gnorm_threshold=data['training']['gnorm_threshold'],
-                r_threshold=data['training']['r_threshold'],
                 batch_size=data['training']['batch_size'],
                 learning_rate=data['training']['learning_rate'],
+                k_folds=data['training'].get('k_folds', 1),
                 save_dir=data['training']['save_dir'],
-                weights=WeightsConfig(**data['training']['weights']),
                 checkpoint_interval=data['training']['checkpoint_interval'],
                 print_interval=data['training']['print_interval'],
-                r_warmup=data['training'].get('r_warmup', 0),
-                overwrite=data['training'].get('overwrite', False)
+                overwrite=data['training'].get('overwrite', False),
+                curriculum=CurriculumConfig(**data['training']['curriculum']),
+                lr_scheduler=LRSchedulerConfig(**data['training']['lr_scheduler']),
+                stopping_criteria=StoppingCriteriaConfig(**data['training']['stopping_criteria']),
+                weights=WeightsConfig(**data['training']['weights'])
             )
         )
 

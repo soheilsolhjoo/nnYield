@@ -37,29 +37,35 @@ class Trainer:
         self.ckpt_dir = os.path.join(self.output_dir, "checkpoints")
         self.checkpoint_manager = CheckpointManager(self.output_dir, self.ckpt_dir)
 
-        # --- SAFETY CHECKS (INTERACTIVE) ---
+        # --- SAFETY CHECKS ---
         if not resume_path:
             if os.path.exists(self.output_dir):
                 has_history = os.path.exists(os.path.join(self.output_dir, "loss_history.csv"))
                 has_weights = os.path.exists(os.path.join(self.output_dir, "best_model.weights.h5"))
                 
                 if has_history or has_weights:
-                    print(f"\n⚠️  WARNING: Output directory '{self.output_dir}' already contains training artifacts.")
-                    
-                    try:
-                        user_choice = input("👉 Overwrite existing data? (y/n): ").lower().strip()
-                        do_overwrite = (user_choice == 'y')
-                    except (EOFError, RuntimeError):
-                        print("📝 Non-interactive environment detected. Using config 'overwrite' setting.")
-                        do_overwrite = self.config.training.overwrite
-
-                    if do_overwrite:
-                        print(f"🧹 Overwriting existing directory: {self.output_dir}")
+                    # 1. Check config first for automatic behavior
+                    if self.config.training.overwrite:
+                        print(f"🧹 Config 'overwrite' is True. Overwriting existing directory: {self.output_dir}")
                         shutil.rmtree(self.output_dir)
                     else:
-                        print("🚫 Run cancelled.")
-                        import sys
-                        sys.exit()
+                        # 2. If not automatic, try to ask the user
+                        print(f"\n⚠️  WARNING: Output directory '{self.output_dir}' already contains training artifacts.")
+                        try:
+                            user_choice = input("👉 Overwrite existing data? (y/n): ").lower().strip()
+                            do_overwrite = (user_choice == 'y')
+                        except (EOFError, RuntimeError):
+                            # 3. If non-interactive and overwrite is False/Missing -> Safe Exit
+                            print("📝 Non-interactive environment detected and overwrite is False/Missing.")
+                            do_overwrite = False
+
+                        if do_overwrite:
+                            print(f"🧹 Overwriting existing directory: {self.output_dir}")
+                            shutil.rmtree(self.output_dir)
+                        else:
+                            print("🚫 Run cancelled.")
+                            import sys
+                            sys.exit()
 
             os.makedirs(self.output_dir, exist_ok=True)
             os.makedirs(self.ckpt_dir, exist_ok=True)
@@ -218,12 +224,12 @@ class Trainer:
             'loss_total': primary_loss, 
             'loss_stress': loss_res['loss_stress'], 
             'loss_r': 0.0, 
-            'loss_batch_conv': loss_res['l_conv'], 
-            'loss_dyn_conv': loss_res['l_dyn'], 
+            'loss_batch_conv': loss_res['loss_batch_conv'], 
+            'loss_dyn_conv': loss_res['loss_dyn_conv'], 
             'loss_ortho': loss_res['loss_ortho'], 
             'gnorm_penalty': gnorm_val,
-            'min_eig_batch': loss_res['min_stat'], 
-            'min_eig_dyn': loss_res['min_dyn']
+            'min_eig_batch': loss_res['min_eig_batch'], 
+            'min_eig_dyn': loss_res['min_eig_dyn']
         }
     
     @tf.function
@@ -234,7 +240,7 @@ class Trainer:
         )
         return {
             'loss_stress': loss_res['loss_stress'], 
-            'loss_r': loss_res['l_r']
+            'loss_r': loss_res['loss_r']
         }
         
     def run(self, train_dataset=None, val_dataset=None):
@@ -248,7 +254,7 @@ class Trainer:
         
         n_uni = self.config.data.samples.get('uniaxial', 0)
         w_r = self.config.training.weights.r_value
-        ani_config = self.config.anisotropy
+        ani_config = self.config.physics_constraints.anisotropy
         
         use_dual_stream = (n_uni > 0) and (w_r > 0) and (ani_config.batch_r_fraction > 0) and ani_config.enabled
 
@@ -261,15 +267,16 @@ class Trainer:
             mode = 'shape'
             print("🚀 Mode: SHAPE ONLY", flush=True)
 
-        conf_dyn = self.config.dynamic_convexity
-        conf_ortho = self.config.orthotropy
-        conf_ani = self.config.anisotropy
+        conf_dyn = self.config.physics_constraints.dynamic_convexity
+        conf_ortho = self.config.physics_constraints.orthotropy
+        conf_ani = self.config.physics_constraints.anisotropy
         w = self.config.training.weights
         
-        stop_loss = self.config.training.loss_threshold
-        stop_conv = self.config.training.convexity_threshold
-        stop_gnorm = self.config.training.gnorm_threshold
-        stop_r = self.config.training.r_threshold
+        stop_criteria = self.config.training.stopping_criteria
+        stop_loss = stop_criteria.loss_threshold
+        stop_conv = stop_criteria.convexity_threshold
+        stop_gnorm = stop_criteria.gnorm_threshold
+        stop_r = stop_criteria.r_threshold
         
         global_step = self.start_epoch * steps 
         best_metric = float('inf')
@@ -278,19 +285,26 @@ class Trainer:
         last_val_r = self.history[-1].get('val_loss_r', float('inf')) if self.history else float('inf')
         # Filter out Nones from history for initialization if they exist
         if last_val_r is None:
-            # Look back further if needed
             for h in reversed(self.history):
                 if h.get('val_loss_r') is not None:
                     last_val_r = h['val_loss_r']
                     break
             if last_val_r is None: last_val_r = float('inf')
 
+        # LR Scheduler State
+        best_loss_for_lr = float('inf')
+        lr_patience_counter = 0
+
         session_start = time.time()
         previous_time = self.history[-1].get('time', 0.0) if self.history else 0.0
 
-        # Track initial weight for ramping
+        # Track initial weights for ramping
         original_w_r = self.config.training.weights.r_value
-        r_warmup_epochs = self.config.training.r_warmup
+        r_warmup_epochs = self.config.training.curriculum.r_warmup
+        
+        original_w_bc = self.config.training.weights.batch_convexity
+        original_w_dc = self.config.training.weights.dynamic_convexity
+        convexity_warmup_epochs = self.config.training.curriculum.convexity_warmup
 
         # --- TRAINING LOOP ---
         for epoch in range(self.start_epoch + 1, self.config.training.epochs + 1):
@@ -300,8 +314,19 @@ class Trainer:
             else:
                 current_w_r = original_w_r
             
-            # Inject dynamic weight into config (shared with self.loss_fn)
+            # 2. Linear Warmup Calculation (Convexity Weights)
+            if convexity_warmup_epochs > 0 and epoch <= convexity_warmup_epochs:
+                ratio = epoch / convexity_warmup_epochs
+                current_w_bc = original_w_bc * ratio
+                current_w_dc = original_w_dc * ratio
+            else:
+                current_w_bc = original_w_bc
+                current_w_dc = original_w_dc
+
+            # Inject dynamic weights into config (shared with self.loss_fn)
             self.config.training.weights.r_value = current_w_r
+            self.config.training.weights.batch_convexity = current_w_bc
+            self.config.training.weights.dynamic_convexity = current_w_dc
 
             metric_keys = [
                 'loss_total', 'loss_stress', 'loss_r', 'loss_batch_conv', 
@@ -333,7 +358,6 @@ class Trainer:
             
             # Use None for history to keep plots clean (dots only)
             current_val_r = None
-            # Always validate if enabled (helps visualize warmup progress)
             if conf_ani.enabled and (run_val_now or epoch == 1 or epoch == self.config.training.epochs):
                 _, current_val_r = self.validate_on_path()
                 last_val_r = current_val_r # Update persistent tracker for stopping logic
@@ -361,6 +385,26 @@ class Trainer:
                 print(log_str, flush=True)
 
             pd.DataFrame(self.history).to_csv(os.path.join(self.output_dir, "loss_history.csv"), index=False)
+
+            # --- 4. LR SCHEDULER LOGIC ---
+            lr_conf = self.config.training.lr_scheduler
+            if lr_conf.enabled:
+                current_loss = row['train_loss_total']
+                if current_loss < best_loss_for_lr:
+                    best_loss_for_lr = current_loss
+                    lr_patience_counter = 0
+                else:
+                    lr_patience_counter += 1
+                
+                if lr_patience_counter >= lr_conf.patience:
+                    old_lr = float(self.optimizer.learning_rate.numpy())
+                    new_lr = max(old_lr * lr_conf.factor, lr_conf.min_lr)
+                    
+                    if new_lr < old_lr:
+                        self.optimizer.learning_rate.assign(new_lr)
+                        print(f"\n📉 [LR Scheduler] Plateau detected. Reducing LR: {old_lr:.2e} -> {new_lr:.2e}")
+                    
+                    lr_patience_counter = 0
 
             if row['train_loss_total'] < best_metric:
                 best_metric = row['train_loss_total']
