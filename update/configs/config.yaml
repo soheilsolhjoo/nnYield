@@ -19,15 +19,15 @@ data:
 # =============================================================================
 physics:
   # synthetic Hill48 parameters (Hill 1948)
-  F: 0.5
-  G: 0.5
-  H: 0.5
-  N: 1.5
+  # F: 0.5
+  # G: 0.5
+  # H: 0.5
+  # N: 1.5
   # Alternative anisotropic set
-  # F: 3.5
-  # G: 3.8
-  # H: 1.55
-  # N: 3.25
+  F: 3.5
+  G: 3.8
+  H: 1.55
+  N: 3.25
 
 physics_constraints:
   anisotropy:
@@ -38,12 +38,12 @@ physics_constraints:
   orthotropy:
     enabled: true
     samples: 100            # number of equator points to probe
-    interval: 10            # run penalty every N steps
+    interval: 50            # run penalty every N steps
     
   dynamic_convexity:
     enabled: true
     samples: 1000           # points probed across full surface
-    interval: 10            # run penalty every N steps
+    interval: 100           # run penalty every N steps
 
 # =============================================================================
 # MODEL ARCHITECTURE
@@ -59,9 +59,9 @@ model:
 # =============================================================================
 training:
   # Basic Loop
-  epochs: 30
+  epochs: 100000
   batch_size: 16
-  learning_rate: 0.001
+  learning_rate: 0.01
   k_folds: 1
   
   # Logging & Persistence
@@ -87,19 +87,19 @@ training:
   stopping_criteria:
     loss_threshold: 0.01       # Total objective
     r_threshold: 0.01          # Mean R-value error
-    convexity_threshold: 2.0e-4 # Target for Min Eigenvalue
+    convexity_threshold: -1.0e-4 # Target for Min Eigenvalue
     gnorm_threshold: 0.01      # Stability (gradient norm)
 
   # --- LOSS WEIGHTS ---
   weights:
     # 1. Primary Accuracy
     stress: 1.0
-    r_value: 5.0
+    r_value: 2.0
     
     # 2. Curvature & Symmetry
-    batch_convexity: 1.0
-    dynamic_convexity: 1.0
-    orthotropy: 0.1
+    batch_convexity: 0.5
+    dynamic_convexity: 0.5
+    orthotropy: 1.0
     
     # 3. Numerical Health
     gnorm_penalty: 1.0

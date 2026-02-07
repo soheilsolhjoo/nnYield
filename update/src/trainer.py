@@ -333,18 +333,19 @@ class Trainer:
                 'loss_dyn_conv', 'loss_ortho', 'gnorm_penalty', 'min_eig_batch', 'min_eig_dyn'
             ]
             train_metrics = {k: tf.keras.metrics.Mean() for k in metric_keys}
+            
+            # --- EPOCH-LEVEL LOGIC DECISIONS ---
+            do_dyn_conv_epoch = (conf_dyn.enabled and w.dynamic_convexity > 0) and \
+                                (conf_dyn.interval == 0 or epoch % conf_dyn.interval == 0 or epoch == 1)
+            do_ortho_epoch = (conf_ortho.enabled and w.orthotropy > 0) and \
+                             (conf_ortho.interval == 0 or epoch % conf_ortho.interval == 0 or epoch == 1)
                             
             for batch_data in dataset:
-                do_dyn_conv = (conf_dyn.enabled and w.dynamic_convexity > 0) and \
-                              (conf_dyn.interval == 0 or global_step % conf_dyn.interval == 0)
-                do_orthotropy = (conf_ortho.enabled and w.orthotropy > 0) and \
-                              (conf_ortho.interval == 0 or global_step % conf_ortho.interval == 0)
-                
                 # Always use dual step if mode is dual; weight controls the influence
                 if mode == 'dual':
-                    step_res = self.train_step_dual(batch_data[0], batch_data[1], do_dyn_conv, do_orthotropy)
+                    step_res = self.train_step_dual(batch_data[0], batch_data[1], do_dyn_conv_epoch, do_ortho_epoch)
                 else:
-                    step_res = self.train_step_shape(batch_data, do_dyn_conv, do_orthotropy)
+                    step_res = self.train_step_shape(batch_data, do_dyn_conv_epoch, do_ortho_epoch)
                     
                 for k, v in step_res.items():
                     if k in train_metrics: train_metrics[k].update_state(v)
@@ -369,7 +370,19 @@ class Trainer:
                 'time': previous_time + current_elapsed,
                 'learning_rate': float(self.optimizer.learning_rate.numpy())
             }
-            for k, v in train_metrics.items(): row[f"train_{k}"] = float(v.result().numpy())
+            
+            # Clean logging: Only record if calculated
+            for k in metric_keys:
+                m_val = float(train_metrics[k].result().numpy())
+                
+                if k == 'loss_r' and mode == 'shape':
+                    row[f"train_{k}"] = None
+                elif k in ['loss_dyn_conv', 'min_eig_dyn'] and not do_dyn_conv_epoch:
+                    row[f"train_{k}"] = None
+                elif k == 'loss_ortho' and not do_ortho_epoch:
+                    row[f"train_{k}"] = None
+                else:
+                    row[f"train_{k}"] = m_val
             
             # Log only the fresh value (or None)
             row['val_loss_r'] = current_val_r
@@ -378,9 +391,12 @@ class Trainer:
             
             # 3. Print Progress (Showing last known validation)
             if epoch % self.config.training.print_interval == 0 or epoch == 1:
+                min_batch_eig = f"{row['train_min_eig_batch']:.1e}" if row['train_min_eig_batch'] is not None else "N/A"
+                min_dyn_eig = f"{row['train_min_eig_dyn']:.1e}" if row['train_min_eig_dyn'] is not None else "N/A"
+                
                 log_str = (f"Ep {epoch}: Loss {row['train_loss_total']:.5f} | "
                            f"Stress: {row['train_loss_stress']:.5f} | R(Val): {last_val_r:.5f} | "
-                           f"MinEig(B/D): {row['train_min_eig_batch']:.1e} / {row['train_min_eig_dyn']:.1e} | "
+                           f"MinEig(B/D): {min_batch_eig} / {min_dyn_eig} | "
                            f"G: {row['train_gnorm_penalty']:.5f}")
                 print(log_str, flush=True)
 
@@ -420,8 +436,8 @@ class Trainer:
             pass_conv = True
             if stop_conv is not None:
                 target_min = -1.0 * abs(stop_conv) 
-                stat_ok = (row['train_min_eig_batch'] >= target_min)
-                dyn_ok = (not w.dynamic_convexity > 0) or (row['train_min_eig_dyn'] >= target_min)
+                stat_ok = (row['train_min_eig_batch'] is None) or (row['train_min_eig_batch'] >= target_min)
+                dyn_ok = (not w.dynamic_convexity > 0) or (row['train_min_eig_dyn'] is None) or (row['train_min_eig_dyn'] >= target_min)
                 pass_conv = stat_ok and dyn_ok
 
             pass_gnorm = (stop_gnorm is None) or (row['train_gnorm_penalty'] <= stop_gnorm)
