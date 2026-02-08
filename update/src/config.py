@@ -95,6 +95,7 @@ class TrainingConfig:
 @dataclass
 class Config:
     experiment_name: str
+    seed: int
     data: DataConfig
     physics: PhysicsConfig
     physics_constraints: PhysicsConstraintsConfig
@@ -111,6 +112,7 @@ class Config:
     def from_dict(cls, data: dict):
         return cls(
             experiment_name=data['experiment_name'],
+            seed=data.get('seed', 42),
             data=DataConfig(**data['data']),
             physics=PhysicsConfig(**data['physics']),
             physics_constraints=PhysicsConstraintsConfig(

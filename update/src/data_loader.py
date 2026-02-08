@@ -1,15 +1,20 @@
 import tensorflow as tf
 import numpy as np
+import os
+import pandas as pd
 from scipy.stats import qmc
 from .config import Config
 
 class YieldDataLoader:
     """
     Data Pipeline for Physics-Informed Yield Surface Training.
-    Updated to use strict Config object access.
+    Supports Data Snapping (Save/Load to CSV) for resume consistency.
     """
     def __init__(self, config: Config):
         self.config = config
+        # Internal storage for raw data arrays
+        self.data_shape = None # (inputs, targets)
+        self.data_phys = None  # (inputs, targets, r_vals, geo, mask)
 
     def get_dataset(self):
         """
@@ -22,25 +27,23 @@ class YieldDataLoader:
         
         n_uni = data_cfg.samples.get('uniaxial', 0)
         w_r = train_cfg.weights.r_value
-        
         batch_r_frac = ani_cfg.batch_r_fraction
         is_enabled = ani_cfg.enabled
         
-        # Dual stream requires: Uniaxial samples exist, Weight > 0, Fraction > 0, and Enabled
         use_dual_stream = (n_uni > 0) and (w_r > 0) and (batch_r_frac > 0) and is_enabled
 
-        # 2. Generate Raw Data
-        data_shape, data_phys = self._generate_raw_data(needs_physics=use_dual_stream)
+        # 2. Ensure Data is Loaded/Generated
+        if self.data_shape is None:
+            self.data_shape, self.data_phys = self._generate_raw_data(needs_physics=use_dual_stream)
 
         # 3. Create Shape Dataset
-        ds_shape = tf.data.Dataset.from_tensor_slices(data_shape)
-        ds_shape = ds_shape.shuffle(len(data_shape[0])).repeat()
+        ds_shape = tf.data.Dataset.from_tensor_slices(self.data_shape)
+        ds_shape = ds_shape.shuffle(len(self.data_shape[0])).repeat()
 
         # 4. Batching Logic
         total_batch = train_cfg.batch_size
 
         if use_dual_stream:
-            # --- MODE B: DUAL STREAM ---
             n_phys_batch = int(total_batch * batch_r_frac)
             n_shape_batch = total_batch - n_phys_batch
             
@@ -49,36 +52,75 @@ class YieldDataLoader:
             
             ds_shape = ds_shape.batch(n_shape_batch)
             
-            ds_phys = tf.data.Dataset.from_tensor_slices(data_phys)
-            ds_phys = ds_phys.shuffle(len(data_phys[0])).repeat()
+            ds_phys = tf.data.Dataset.from_tensor_slices(self.data_phys)
+            ds_phys = ds_phys.shuffle(len(self.data_phys[0])).repeat()
             ds_phys = ds_phys.batch(n_phys_batch)
             
-            steps = len(data_shape[0]) // n_shape_batch
-            
+            steps = len(self.data_shape[0]) // n_shape_batch
             return ds_shape, ds_phys, steps
         else:
-            # --- MODE A: SHAPE ONLY ---
             ds_shape = ds_shape.batch(total_batch)
-            steps = len(data_shape[0]) // total_batch
-            
+            steps = len(self.data_shape[0]) // total_batch
             return ds_shape, None, steps
 
-    def get_numpy_data(self):
-        """
-        Flattens the generated streams into single numpy arrays.
-        """
-        # Force generation of both streams to get maximum data
-        (X_s, y_s), (X_p, y_p, r_p, _, _) = self._generate_raw_data(needs_physics=True)
+    def save_data(self, output_dir):
+        """ Saves internal data arrays to CSV files for reproducibility. """
+        if self.data_shape is None:
+            return
+            
+        # 1. Save Shape Data
+        inp_s, tar_s = self.data_shape
+        df_shape = pd.DataFrame(inp_s, columns=['s11', 's22', 's12'])
+        df_shape['target_stress'] = tar_s
+        df_shape.to_csv(os.path.join(output_dir, "train_data_shape.csv"), index=False)
+
+        # 2. Save Physics Data
+        if self.data_phys is not None and len(self.data_phys[0]) > 0:
+            inp_p, tar_p, r_p, geo_p, mask_p = self.data_phys
+            df_phys = pd.DataFrame(inp_p, columns=['s11', 's22', 's12'])
+            df_phys['target_stress'] = tar_p
+            df_phys['target_r'] = r_p
+            df_phys[['sin2', 'cos2', 'sc']] = geo_p
+            df_phys['mask'] = mask_p
+            df_phys.to_csv(os.path.join(output_dir, "train_data_physics.csv"), index=False)
         
-        X = np.concatenate([X_s, X_p], axis=0)
-        y_se = np.concatenate([y_s, y_p], axis=0)
-        
-        r_s = np.zeros((len(X_s), 1), dtype=np.float32)
-        y_r = np.concatenate([r_s, r_p], axis=0)
-        
-        return X, y_se, y_r
-    
+        print(f"💾 Training data snapped to CSV in: {output_dir}")
+
+    def load_data(self, output_dir):
+        """ Loads data arrays from CSV files. Returns True if successful. """
+        path_s = os.path.join(output_dir, "train_data_shape.csv")
+        path_p = os.path.join(output_dir, "train_data_physics.csv")
+
+        if not os.path.exists(path_s):
+            return False
+
+        try:
+            # 1. Load Shape
+            df_s = pd.read_csv(path_s)
+            self.data_shape = (
+                df_s[['s11', 's22', 's12']].values.astype(np.float32),
+                df_s[['target_stress']].values.astype(np.float32)
+            )
+
+            # 2. Load Physics
+            if os.path.exists(path_p):
+                df_p = pd.read_csv(path_p)
+                self.data_phys = (
+                    df_p[['s11', 's22', 's12']].values.astype(np.float32),
+                    df_p[['target_stress']].values.astype(np.float32),
+                    df_p[['target_r']].values.astype(np.float32),
+                    df_p[['sin2', 'cos2', 'sc']].values.astype(np.float32),
+                    df_p[['mask']].values.astype(np.float32)
+                )
+            
+            print(f"📖 Restored original training data from: {output_dir}")
+            return True
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to load snapped data ({e}). Falling back to generator.")
+            return False
+
     def _generate_raw_data(self, needs_physics=True):
+        """ Restored logic from stable baseline. """
         data_cfg = self.config.data
         model_cfg = self.config.model
         phys_cfg = self.config.physics
@@ -88,88 +130,57 @@ class YieldDataLoader:
         
         ref_stress = model_cfg.ref_stress
         F, G, H, N = phys_cfg.F, phys_cfg.G, phys_cfg.H, phys_cfg.N
-        
-        # Stiffness coefficients for generator
         C11, C22, C12, C66 = G+H, F+H, -2*H, 2*N
         use_positive_shear = data_cfg.positive_shear
 
-        # --- 1. SHAPE DATA (Random Loci) ---
+        # --- 1. SHAPE DATA ---
         if n_gen > 0:
             sampler = qmc.Sobol(d=2, scramble=True)
             sample = sampler.random(n_gen)
             max_shear = ref_stress / np.sqrt(C66)
-            
             if use_positive_shear:
                 s12_g = (sample[:, 0] * max_shear).astype(np.float32)
             else:
                 s12_g = ((sample[:, 0] * 2.0 - 1.0) * max_shear).astype(np.float32)
-                
             theta_g = (sample[:, 1] * 2.0 * np.pi).astype(np.float32)
             rhs = np.maximum(ref_stress**2 - C66*s12_g**2, 0)
             c, s = np.cos(theta_g), np.sin(theta_g)
-            denom = C11*c**2 + C22*s**2 + C12*c*s
-            radius = np.sqrt(rhs / (denom + 1e-8))
-            
+            radius = np.sqrt(rhs / (C11*c**2 + C22*s**2 + C12*c*s + 1e-8))
             inputs_gen = np.stack([radius*c, radius*s, s12_g], axis=1)
             se_gen = np.ones((n_gen, 1), dtype=np.float32) * ref_stress
         else:
             inputs_gen = np.zeros((0, 3), dtype=np.float32)
             se_gen = np.zeros((0, 1), dtype=np.float32)
 
-        # --- 1b. INJECT ANCHOR POINTS ---
-        anchors_dir = np.array([
-            [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0],
-            [1.0, 1.0, 0.0], [-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [-1.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0]
-        ], dtype=np.float32)
-
+        # --- 1b. ANCHORS ---
+        anchors_dir = np.array([[1,0,0],[0,1,0],[-1,0,0],[0,-1,0],[1,1,0],[-1,-1,0],[1,-1,0],[-1,1,0],[0,0,1]], dtype=np.float32)
         s11, s22, s12 = anchors_dir[:,0], anchors_dir[:,1], anchors_dir[:,2]
         term = F*s22**2 + G*s11**2 + H*(s11-s22)**2 + 2*N*s12**2
-        scale_factors = ref_stress / np.sqrt(term + 1e-8)
-        anchors_inputs = anchors_dir * scale_factors[:, None]
+        anchors_inputs = anchors_dir * (ref_stress / np.sqrt(term + 1e-8))[:, None]
         anchors_targets = np.ones((len(anchors_inputs), 1), dtype=np.float32) * ref_stress
-
         inputs_gen = np.concatenate([inputs_gen, anchors_inputs], axis=0)
         se_gen = np.concatenate([se_gen, anchors_targets], axis=0)
-        data_shape = (inputs_gen, se_gen)
         
         # --- 2. PHYSICS DATA ---
         if n_uni > 0:
             limit = np.pi / 2.0 if use_positive_shear else 2.0 * np.pi
             alpha_uni = np.linspace(0, limit, n_uni, endpoint=True, dtype=np.float32)
             sin_a, cos_a = np.sin(alpha_uni), np.cos(alpha_uni)
-            
             u11, u22, u12 = cos_a**2, sin_a**2, sin_a*cos_a
             term_u = F*u22**2 + G*u11**2 + H*(u11-u22)**2 + 2*N*u12**2
             scale_uni = ref_stress / np.sqrt(term_u + 1e-8)
-            
             inputs_uni = np.stack([u11*scale_uni, u22*scale_uni, u12*scale_uni], axis=1)
             se_uni = np.ones((n_uni, 1), dtype=np.float32) * ref_stress
-            
             s11, s22, s12 = inputs_uni[:,0], inputs_uni[:,1], inputs_uni[:,2]
-            denom = ref_stress 
-            g11 = (G*s11 + H*(s11-s22)) / denom
-            g22 = (F*s22 - H*(s11-s22)) / denom
-            g12 = (2*N*s12) / denom
-            
+            g11, g22, g12 = (G*s11 + H*(s11-s22))/ref_stress, (F*s22 - H*(s11-s22))/ref_stress, (2*N*s12)/ref_stress
             d_eps_t = -(g11 + g22)
             d_eps_w = g11*sin_a**2 + g22*cos_a**2 - g12*sin_a*cos_a
-            r_calc = d_eps_w / (d_eps_t + 1e-8)
-            
-            valid = (np.abs(r_calc) < 20.0) & (np.abs(d_eps_t) > 1e-6)
-            
-            if np.sum(valid) > 0:
-                inputs_uni = inputs_uni[valid]
-                se_uni = se_uni[valid]
-                r_vals = r_calc[valid][:, None]
-                geo_uni = np.stack([sin_a**2, cos_a**2, sin_a*cos_a], axis=1)[valid]
-                mask_uni = np.ones((len(se_uni), 1), dtype=np.float32)
-            else:
-                inputs_uni, se_uni, r_vals, geo_uni, mask_uni = [np.array([], dtype=np.float32) for _ in range(5)]
+            r_vals = (d_eps_w / (d_eps_t + 1e-8))[:, None]
+            geo_uni = np.stack([sin_a**2, cos_a**2, sin_a*cos_a], axis=1)
+            mask_uni = np.ones((len(se_uni), 1), dtype=np.float32)
         else:
             inputs_uni = np.zeros((0, 3), dtype=np.float32)
             se_uni, r_vals, mask_uni = [np.zeros((0, 1), dtype=np.float32) for _ in range(3)]
             geo_uni = np.zeros((0, 3), dtype=np.float32)
 
-        data_phys = (inputs_uni, se_uni, r_vals, geo_uni, mask_uni)
-        return data_shape, data_phys
+        return (inputs_gen, se_gen), (inputs_uni, se_uni, r_vals, geo_uni, mask_uni)

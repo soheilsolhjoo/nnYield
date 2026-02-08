@@ -74,6 +74,12 @@ def main():
         config.training.save_dir = head
         config.experiment_name = tail
 
+    # --- 1b. APPLY GLOBAL SEED ---
+    if config:
+        np.random.seed(config.seed)
+        tf.random.set_seed(config.seed)
+        print(f"🎲 Global seed set to: {config.seed}")
+
     # --- 2. TRAINING LOGIC ---
     if args.train:
         # Validate Transfer
