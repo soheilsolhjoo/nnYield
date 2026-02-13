@@ -14,7 +14,8 @@ seed: 42
 # =============================================================================
 data:
   # type: Source of training data. 
-  # 'synthetic' generates targets from the physics model below. 
+  # 'synthetic' generates targets from Hill48 math below. 
+  # 'csv' loads from an external file (requires further config).
   type: "synthetic"         
 
   # positive_shear: Constrains the S12 shear stress range.
@@ -36,22 +37,18 @@ data:
 # =============================================================================
 # These parameters define the "Target" material when data.type is 'synthetic'.
 physics:
-  # type: The analytical yield criterion to use as benchmark and data source.
-  # Options: 'von_mises', 'hill48', 'yld91'
-  type: "von_mises"
-
-  # Hill 1984 Parameters
+  # synthetic Hill48 parameters (Hill 1948)
+  # F, G, H: Control anisotropy in the principal planes.
+  # N: Controls the shear behavior. 
+  # For Von Mises: F=G=H=0.5, N=1.5
   F: 0.25
   G: 0.83
   H: 0.17
   N: 2.24
-
-  # Barlat 1991 Parameters (Case Study: Annealed 420 Steel from Report)
-  c1: 0.6544
-  c2: 0.8096
-  c3: 1.2510
-  c6: 1.0288
-  m: 6.0 # Exponent for BCC materials
+  # F: 0.5
+  # G: 0.5
+  # H: 0.5
+  # N: 1.5
 
 physics_constraints:
   anisotropy:
@@ -72,7 +69,7 @@ physics_constraints:
     
   dynamic_convexity:
     # enabled: If true, probes the surface for "concave" regions and penalizes them.
-    enabled: true
+    enabled: false
     # samples: Number of random points across the full 3D surface probed per check.
     samples: 1000           
     # interval: Frequency (in epochs) to run the heavy Hessian eigenvalue check.

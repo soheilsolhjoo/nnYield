@@ -7,29 +7,6 @@ It supports four main operations:
 2. Resumed Training: Continue an existing experiment from a checkpoint.
 3. Model Export: Convert a trained Keras model to ONNX format.
 4. Sanity Check: Run automated physical consistency tests on a trained model.
-
-USAGE EXAMPLES:
----------------
-1. Fresh Training:
-   python main.py --config configs/config.yaml --train
-
-2. Resume from a folder (automatically picks the latest checkpoint):
-   python main.py --resume outputs/experiment_name --train
-
-3. Resume from a specific state file:
-   python main.py --resume outputs/exp/checkpoints/ckpt_epoch_50.state.pkl --train
-
-4. Transfer Learning (load weights into a new experiment):
-   python main.py --config configs/config.yaml --transfer outputs/old_exp/best_model.weights.h5 --train
-
-5. Run Sanity Checks on a trained model:
-   python main.py --resume outputs/experiment_name --check
-
-6. Export a trained model to ONNX:
-   python main.py --resume outputs/experiment_name --export
-
-7. Train and then immediately Check:
-   python main.py --config configs/config.yaml --train --check
 """
 
 import os
@@ -54,13 +31,10 @@ def main():
     """
     Main execution logic for the nnYield CLI.
     """
-    parser = argparse.ArgumentParser(
-        description="nnYield: Physics-Informed Neural Yield Surface Modeling",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="See the module docstring for detailed usage examples."
-    )
+    parser = argparse.ArgumentParser(description="nnYield: Physics-Informed Neural Yield Surface Modeling")
     
     # --- INPUT MODE GROUP (Mutually Exclusive) ---
+    # The user must provide exactly one source for the experiment configuration.
     group_in = parser.add_mutually_exclusive_group(required=True)
     group_in.add_argument("--config", type=str, help="Path to config.yaml for fresh training.")
     group_in.add_argument("--resume", type=str, help="Path to experimental FOLDER or .state.pkl file to resume.")
@@ -89,10 +63,7 @@ def main():
         if os.path.isfile(resume_path):
             parent = os.path.dirname(resume_path)
             # If user pointed to /checkpoints/ckpt.pkl, the config is one level up.
-            if os.path.basename(parent) == 'checkpoints':
-                base_dir = os.path.dirname(parent)
-            else:
-                base_dir = parent
+            base_dir = os.path.dirname(parent) if os.path.basename(parent) == 'checkpoints' else parent
         else:
             base_dir = resume_path
 
@@ -105,9 +76,6 @@ def main():
 
     elif args.config:
         # FRESH START LOGIC: Load directly from the provided path.
-        if not os.path.exists(args.config):
-            print(f"❌ Error: Config file not found at {args.config}")
-            sys.exit(1)
         config = Config.from_yaml(args.config)
         
     elif args.import_dir:
@@ -117,7 +85,6 @@ def main():
             print(f"❌ Error: No config.yaml found in {args.import_dir}")
             sys.exit(1)
         config = Config.from_yaml(conf_path)
-        # Inherit output directory structure from the imported folder
         head, tail = os.path.split(os.path.abspath(args.import_dir))
         config.training.save_dir = head
         config.experiment_name = tail
@@ -178,7 +145,6 @@ def main():
                                           .shuffle(len(train_idx)).batch(bs)
                 ds_val = tf.data.Dataset.from_tensor_slices((X[val_idx], y_se[val_idx], y_r[val_idx])).batch(bs)
                 
-                # Instantiate a fresh trainer for each fold
                 trainer = Trainer(config, config_path=args.config, fold_idx=k+1)
                 final_metric = trainer.run(train_dataset=(ds_train, None, steps), val_dataset=ds_val)
                 
@@ -193,7 +159,7 @@ def main():
             best_fold = df_results.loc[best_idx]
             print(f"\n🏆 Best Fold: {int(best_fold['fold'])} (Loss: {best_fold['val_loss']:.6f})")
             
-            # Copy artifacts from the best fold to the root experiment folder
+            # Move the best weights to the root experiment folder
             root_dir = os.path.join(config.training.save_dir, config.experiment_name)
             for ext in [".weights.h5", ".state.pkl"]:
                 src = os.path.join(best_fold['dir'], f"best_model{ext}")
@@ -202,20 +168,21 @@ def main():
                     shutil.copy(src, dst)
             
             df_results.to_csv(os.path.join(root_dir, "kfold_summary.csv"), index=False)
-            print(f"✅ Best model promoted to: {root_dir}")
+            print(f"✅ Promoted best model artifacts to: {root_dir}")
 
     # =============================================================================
     # 4. ACTION: EXPORT (ONNX)
     # =============================================================================
     if args.export:
         print("\n=== STARTING MODEL EXPORT ===")
+        # Attempt to find the 'best' model first, then the last saved model.
         exp_root = os.path.join(config.training.save_dir, config.experiment_name)
         weights_path = os.path.join(exp_root, "best_model.weights.h5")
         if not os.path.exists(weights_path):
              weights_path = os.path.join(exp_root, "model.weights.h5")
 
         if not os.path.exists(weights_path):
-            print(f"❌ Error: Weights not found at {weights_path}. Train the model first.")
+            print(f"❌ Error: Weights not found at {weights_path}. Please train the model first.")
             sys.exit(1)
             
         exporter = Exporter(config) 
@@ -227,6 +194,7 @@ def main():
     if args.check:
         print("\n=== STARTING SANITY CHECK ===")
         
+        # A. Resolve model path
         output_dir = os.path.join(config.training.save_dir, config.experiment_name)
         weights_path = os.path.join(output_dir, "best_model.weights.h5")
         if not os.path.exists(weights_path):
@@ -236,15 +204,15 @@ def main():
             print(f"❌ Error: Weights not found at {weights_path}.")
             sys.exit(1)
             
-        # Reconstruct model and load learned parameters
+        # B. Load Model into Memory
         print(f"   -> Initializing architecture...")
         model = HomogeneousYieldModel(config) 
         _ = model(tf.zeros((1, 3))) # Trigger build
         
-        print(f"   -> Loading parameters from: {weights_path}")
+        print(f"   -> Loading learned parameters...")
         model.load_weights(weights_path)
         
-        # Run the validation suite
+        # C. Run Diagnostics
         checker = SanityChecker(model, config, output_dir) 
         checker.run_all()
 

@@ -75,22 +75,11 @@ class ModelConfig:
 
 @dataclass
 class PhysicsConfig:
-    """
-    Flexible container for material parameters.
-    Supports Hill48 (F, G, H, N) and Barlat (c1, c2, c3, c6, m).
-    """
-    type: str = "hill48"
-    # Hill parameters
-    F: float = 0.5
-    G: float = 0.5
-    H: float = 0.5
-    N: float = 1.5
-    # Barlat parameters
-    c1: float = 1.0
-    c2: float = 1.0
-    c3: float = 1.0
-    c6: float = 1.0
-    m: float = 8.0
+    """Material parameters for the target physics model (e.g., Hill48)."""
+    F: float
+    G: float
+    H: float
+    N: float
 
 @dataclass
 class WeightsConfig:
@@ -126,6 +115,8 @@ class TrainingConfig:
 class Config:
     """
     Root configuration object representing the entire experiment state.
+    
+    This class serves as the 'Source of Truth' for all components of nnYield.
     """
     experiment_name: str
     seed: int
@@ -146,6 +137,7 @@ class Config:
     def from_dict(cls, data: dict):
         """
         Constructs a type-safe Config object from a nested dictionary.
+        Handles deep initialization of all sub-dataclasses.
         """
         return cls(
             experiment_name=data['experiment_name'],
@@ -183,8 +175,8 @@ class Config:
         return {
             'hidden_layers': self.model.hidden_layers,
             'activation': self.model.activation,
-            'input_dim': 3, 
-            'output_dim': 1 
+            'input_dim': 3,  # Stress space: S11, S22, S12
+            'output_dim': 1  # Resulting equivalent stress
         }
 
 def load_config(path: str) -> Config:

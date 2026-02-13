@@ -1,11 +1,20 @@
+"""
+Neural Network Material Model Module for nnYield.
+
+This module implements the HomogeneousYieldModel, a specialized PINN architecture 
+designed to represent any closed, convex yield surface without mathematical 
+singularities or discontinuities.
+"""
+
 import tensorflow as tf
 import numpy as np
 from .config import Config
 
 class HomogeneousYieldModel(tf.keras.Model):
     """
-    Neural Network material model.
-    Refactored to use strict Config object access.
+    Singularity-Free Yield Surface Model.
+    
+    This model predicts equivalent stress as a homogeneous function of degree 1.
     """
     def __init__(self, config: Config):
         super(HomogeneousYieldModel, self).__init__()
@@ -13,12 +22,15 @@ class HomogeneousYieldModel(tf.keras.Model):
         model_cfg = config.model
         self.ref_stress = model_cfg.ref_stress
         
-        # ICNN logic: Positive weights guarantee output is convex w.r.t inputs
+        # TRICK: ICNN ARCHITECTURE.
+        # If enabled, we constrain the weights to be non-negative.
+        # This is a 'hard' physical constraint that ensures the resulting 
+        # surface is mathematically guaranteed to be convex.
         use_icnn = model_cfg.use_icnn_constraints
         k_constraint = tf.keras.constraints.NonNeg() if use_icnn else None
         
         if use_icnn:
-            print(f"🔒 ICNN Mode Enabled: Weights constrained to be Non-Negative.")
+            print(f"🔒 ICNN Mode: Convexity is architecturally guaranteed.")
 
         self.hidden_layers = []
         for units in model_cfg.hidden_layers:
@@ -38,62 +50,54 @@ class HomogeneousYieldModel(tf.keras.Model):
 
     def predict_radius(self, theta, phi):
         """
-        Directly predicts Yield Radius from angles.
-        Uses Coupled Angular Features to eliminate singularity at phi=0.
+        TRICK: POLE-FREE ANGULAR EMBEDDING.
+        
+        Using raw angles (theta, phi) causes a jump discontinuity at the poles (phi=0).
+        We solve this by embedding the angles into a higher-dimensional directional 
+        space [d1, d2, d3] which is continuous everywhere on the sphere.
         """
-        # Feature 1: d1 = sin(phi) * cos(theta)
-        # Represents the component pointing towards S11.
-        # At phi=0 (Pole), sin(phi)=0, so d1 -> 0 smoothly regardless of theta.
+        # Embed spherical coordinates into a continuous unit direction space
         d1 = tf.sin(phi) * tf.cos(theta)
-        
-        # Feature 2: d2 = sin(phi) * sin(theta)
-        # Represents the component pointing towards S22.
-        # At phi=0 (Pole), d2 -> 0 smoothly.
         d2 = tf.sin(phi) * tf.sin(theta)
+        d3 = tf.square(tf.cos(phi)) # Squared for physical symmetry
         
-        # Feature 3: d3 = cos^2(phi)
-        # Represents the component pointing towards Shear (squared for symmetry).
-        d3 = tf.square(tf.cos(phi))
-        
-        # Stack coupled features: [d1, d2, d3]
-        features = tf.stack([d1, d2, d3], axis=1)
-        
-        x = features
+        x = tf.stack([d1, d2, d3], axis=1)
         for layer in self.hidden_layers:
             x = layer(x)
             
         return self.radius_out(x)
         
     def call(self, inputs):
+        """
+        TRICK: HOMOGENEOUS SCALING.
+        
+        The Neural Network is trained to predict the 'Yield Radius' R in a 
+        given direction. We then calculate the equivalent stress as:
+        Equivalent Stress = Ref_Stress * (Actual_Magnitude / Predicted_Radius)
+        
+        This makes the model naturally 'Homogeneous of Degree 1', which means 
+        f(k * sigma) = k * f(sigma), a requirement for all yield criteria.
+        """
         # inputs: [s11, s22, s12]
         s11 = inputs[:, 0:1]
         s22 = inputs[:, 1:2]
         s12 = inputs[:, 2:3]
         
-        # 1. Total Magnitude (Radius)
+        # 1. Total Magnitude
         r_sq = tf.square(s11) + tf.square(s22) + tf.square(s12)
         r_total = tf.sqrt(r_sq + 1e-8)
         
-        # 2. Coupled Directional Embeddings (Singularity-Free)
-        # d1 = s11 / R_total  (Equivalent to sin(phi)*cos(theta))
-        # At pure shear (s11=0, s22=0), this is 0/R = 0: Smooth.
+        # 2. Coupled Directional Embeddings
+        # These features represent the 'unit direction' of the stress state.
         d1 = s11 / (r_total + 1e-8)
-
-        # d2 = s22 / R_total  (Equivalent to sin(phi)*sin(theta))
         d2 = s22 / (r_total + 1e-8)
-
-        # d3 = (s12 / R_total)^2  (Equivalent to cos^2(phi))
-        # Squared for physical symmetry (f(s12) = f(-s12))
-        d3 = tf.square(s12 / (r_total + 1e-8))
+        d3 = tf.square(s12 / (r_total + 1e-8)) # s12 symmetry
         
-        features = tf.concat([d1, d2, d3], axis=1)
-        
-        x = features
+        x = tf.concat([d1, d2, d3], axis=1)
         for layer in self.hidden_layers:
             x = layer(x)
         
         R_yield = self.radius_out(x)
         
-        # Homogeneous Scaling
-        se = self.ref_stress * (r_total / (R_yield + 1e-8))
-        return se
+        # Final Scaled Result
+        return self.ref_stress * (r_total / (R_yield + 1e-8))
